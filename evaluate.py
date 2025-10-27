@@ -12,7 +12,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
 def run_vsi_eval(
-    model_name: str, out_dir: str, n_frames: int = 16, max_samples: int = None
+    model_name: str, out_dir: str, n_frames: int = 16, max_samples: int = None, batch_size: int = 4
 ):
     DATA_ROOT = "/projects/vig/Datasets/VSI-Bench/videos"
     DATASET_PATH = "nyu-visionx/VSI-Bench"
@@ -118,99 +118,151 @@ def run_vsi_eval(
             if not frames:
                 continue
 
-            for row in samples:
-                qid = f"vsi_{row['id']}"
-                if qid in completed_ids:
-                    continue
+            # Filter out already completed samples
+            samples_to_process = [
+                row for row in samples 
+                if f"vsi_{row['id']}" not in completed_ids
+            ]
+            
+            if not samples_to_process:
+                continue
 
-                q = row["question"]
-                opts = row["options"]
-                gt = row["ground_truth"]
-
-                if not opts or len(opts) == 0:
-                    prompt = f"Question: {q}\nAnswer only with a numeric answer."
-                else:
-                    prompt = f"Question: {q}\nOptions: {', '.join(opts)}\nAnswer only with the exact option text."
-
-                if "VL" in model_name:
-                    messages = [
-                        {
-                            "role": "user",
-                            "content": (
-                                [{"type": "image", "image": frame} for frame in frames]
-                                + [{"type": "text", "text": prompt}]
-                            ),
-                        }
-                    ]
-                    text_prompt = processor.apply_chat_template(
-                        messages, tokenize=False, add_generation_prompt=True
-                    )
-                    inputs = processor(
-                        text=text_prompt, images=frames, return_tensors="pt"
-                    ).to(DEVICE)
-                    output = model.generate(
-                        **inputs, do_sample=False, max_new_tokens=64
-                    )
-                    # Fix: Only decode the generated tokens, not the input
-                    generated_ids = output[:, inputs["input_ids"].shape[1]:]
-                    pred = processor.batch_decode(generated_ids, skip_special_tokens=True)[
-                        0
-                    ].strip()
-                else:
-                    inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
-                    output = model.generate(
-                        **inputs, do_sample=False, max_new_tokens=64
-                    )
-                    # Fix: Only decode the generated tokens, not the input
-                    generated_ids = output[:, inputs["input_ids"].shape[1]:]
-                    pred = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-
-                pred = pred.strip()
-
-                if opts and len(opts) > 0:
-                    # Improved matching: look for option letter at start of prediction
-                    pred_upper = pred.upper()
-                    # Try to extract letter choice (A, B, C, D) from start of answer
-                    letter_match = re.match(r'^([A-D])[\.\)\:\s]', pred_upper)
-                    if letter_match:
-                        pred_letter = letter_match.group(1)
-                        # Find matching option
-                        pred_text = next(
-                            (opt for opt in opts if opt.startswith(f"{pred_letter}.")), 
-                            pred
-                        )
+            # Process samples in batches
+            for batch_start in range(0, len(samples_to_process), batch_size):
+                batch_rows = samples_to_process[batch_start:batch_start + batch_size]
+                
+                # Prepare batch prompts and metadata
+                batch_prompts = []
+                batch_metadata = []
+                
+                for row in batch_rows:
+                    q = row["question"]
+                    opts = row["options"]
+                    gt = row["ground_truth"]
+                    
+                    if not opts or len(opts) == 0:
+                        prompt = f"Question: {q}\nAnswer only with a numeric answer."
                     else:
-                        # Fallback: try to match option text in prediction
-                        pred_text = next(
-                            (opt for opt in opts if opt.split('. ', 1)[-1].lower() in pred.lower()), 
-                            pred
+                        prompt = f"Question: {q}\nOptions: {', '.join(opts)}\nAnswer only with the exact option text."
+                    
+                    batch_prompts.append(prompt)
+                    batch_metadata.append({
+                        "row": row,
+                        "opts": opts,
+                        "gt": gt,
+                        "q": q
+                    })
+                
+                # Generate predictions for batch
+                if "VL" in model_name:
+                    # For VL models, batch process with shared frames
+                    all_text_prompts = []
+                    for prompt in batch_prompts:
+                        messages = [
+                            {
+                                "role": "user",
+                                "content": (
+                                    [{"type": "image", "image": frame} for frame in frames]
+                                    + [{"type": "text", "text": prompt}]
+                                ),
+                            }
+                        ]
+                        text_prompt = processor.apply_chat_template(
+                            messages, tokenize=False, add_generation_prompt=True
                         )
-                    pred_text = pred_text.strip()
-                    correct = pred_text.lower() == gt.lower() or pred_text.startswith(f"{gt}.")
+                        all_text_prompts.append(text_prompt)
+                    
+                    # Batch process with padding
+                    inputs = processor(
+                        text=all_text_prompts, 
+                        images=[frames] * len(all_text_prompts),
+                        return_tensors="pt",
+                        padding=True
+                    ).to(DEVICE)
+                    
+                    outputs = model.generate(
+                        **inputs, 
+                        do_sample=False, 
+                        max_new_tokens=32,
+                        temperature=None,
+                        pad_token_id=processor.tokenizer.pad_token_id
+                    )
+                    
+                    # Decode only generated tokens
+                    generated_ids = outputs[:, inputs["input_ids"].shape[1]:]
+                    predictions = processor.batch_decode(generated_ids, skip_special_tokens=True)
                 else:
-                    pred_text = pred
-                    try:
-                        correct = abs(float(pred_text) - float(gt)) < 1e-2
-                    except Exception:
-                        correct = pred_text.lower().strip() == gt.lower().strip()
+                    inputs = tokenizer(
+                        batch_prompts, 
+                        return_tensors="pt", 
+                        padding=True
+                    ).to(DEVICE)
+                    
+                    outputs = model.generate(
+                        **inputs, 
+                        do_sample=False, 
+                        max_new_tokens=32,
+                        temperature=None,
+                        pad_token_id=tokenizer.pad_token_id
+                    )
+                    
+                    # Decode only generated tokens
+                    generated_ids = outputs[:, inputs["input_ids"].shape[1]:]
+                    predictions = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+                
+                # Process each prediction
+                for meta, pred in zip(batch_metadata, predictions):
+                    pred = pred.strip()
+                    row = meta["row"]
+                    opts = meta["opts"]
+                    gt = meta["gt"]
+                    q = meta["q"]
+                    qid = f"vsi_{row['id']}"
 
-                result = {
-                    "id": qid,
-                    "video": video_path,
-                    "question": q,
-                    "options": opts,
-                    "pred": pred_text,
-                    "gt": gt,
-                    "match": int(correct),
-                    "question_type": row.get("question_type", "unknown"),
-                    "dataset": row["dataset"],
-                }
+                    if opts and len(opts) > 0:
+                        # Improved matching: look for option letter at start of prediction
+                        pred_upper = pred.upper()
+                        # Try to extract letter choice (A, B, C, D) from start of answer
+                        letter_match = re.match(r'^([A-D])[\.\)\:\s]', pred_upper)
+                        if letter_match:
+                            pred_letter = letter_match.group(1)
+                            # Find matching option
+                            pred_text = next(
+                                (opt for opt in opts if opt.startswith(f"{pred_letter}.")), 
+                                pred
+                            )
+                        else:
+                            # Fallback: try to match option text in prediction
+                            pred_text = next(
+                                (opt for opt in opts if opt.split('. ', 1)[-1].lower() in pred.lower()), 
+                                pred
+                            )
+                        pred_text = pred_text.strip()
+                        correct = pred_text.lower() == gt.lower() or pred_text.startswith(f"{gt}.")
+                    else:
+                        pred_text = pred
+                        try:
+                            correct = abs(float(pred_text) - float(gt)) < 1e-2
+                        except Exception:
+                            correct = pred_text.lower().strip() == gt.lower().strip()
 
-                new_results.append(result)
+                    result = {
+                        "id": qid,
+                        "video": video_path,
+                        "question": q,
+                        "options": opts,
+                        "pred": pred_text,
+                        "gt": gt,
+                        "match": int(correct),
+                        "question_type": row.get("question_type", "unknown"),
+                        "dataset": row["dataset"],
+                    }
 
-                if len(new_results) % 25 == 0:
-                    with open(out_path, "w") as f:
-                        json.dump(results + new_results, f, indent=2)
+                    new_results.append(result)
+
+                    if len(new_results) % 25 == 0:
+                        with open(out_path, "w") as f:
+                            json.dump(results + new_results, f, indent=2)
 
     results += new_results
     with open(out_path, "w") as f:
@@ -228,4 +280,4 @@ if __name__ == "__main__":
     ]
 
     for m in models:
-        run_vsi_eval(m, out_dir="vsi_outputs/", n_frames=16)
+        run_vsi_eval(m, out_dir="vsi_outputs/", n_frames=32, batch_size=4)
