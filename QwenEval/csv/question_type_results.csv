@@ -1,0 +1,11 @@
+Question Type,qwen2-5-vl-3b,qwen2-5-vl-7b,qwen3-vl-4b,qwen3-vl-8b
+obj_appearance_order,25.08,25.08,25.08,25.08
+object_abs_distance,2.76,0.96,9.35,9.95
+object_counting,24.25,22.48,48.32,49.20
+object_rel_direction_easy,50.23,50.23,50.23,50.23
+object_rel_direction_hard,24.66,24.66,24.66,24.66
+object_rel_direction_medium,33.33,33.33,33.33,33.33
+object_rel_distance,24.93,24.93,24.93,24.93
+object_size_estimation,3.36,9.02,32.21,30.22
+room_size_estimation,5.21,8.33,12.85,14.58
+route_planning,29.38,29.38,29.38,29.38

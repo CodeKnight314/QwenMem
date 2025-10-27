@@ -1,0 +1,5 @@
+Model,Overall Accuracy,Overall Correct,Overall Total,MC Accuracy,MC Correct,MC Total,Numeric Accuracy,Numeric Correct,Numeric Total
+qwen2-5-vl-3b,17.99,923,5130,28.76,716,2490,7.84,207,2640
+qwen2-5-vl-7b,18.73,961,5130,28.76,716,2490,9.28,245,2640
+qwen3-vl-4b,27.50,1411,5130,28.76,716,2490,26.33,695,2640
+qwen3-vl-8b,27.43,1407,5130,28.76,716,2490,26.17,691,2640

@@ -1,0 +1,4 @@
+Dataset,qwen2-5-vl-3b,qwen2-5-vl-7b,qwen3-vl-4b,qwen3-vl-8b
+arkitscenes,15.99,17.68,29.54,29.23
+scannet,18.64,19.22,26.80,26.65
+scannetpp,19.27,19.20,26.27,26.54
