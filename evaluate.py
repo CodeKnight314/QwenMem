@@ -8,8 +8,27 @@ from tqdm import tqdm
 from PIL import Image
 from collections import defaultdict
 from datasets import load_dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM
+import gc
 
+def sample_frames(video_path: str, n_frames: int = 8):
+    cap = cv2.VideoCapture(video_path)
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if total == 0:
+        cap.release()
+        print(f"⚠️ Empty or broken video: {video_path}")
+        return []
+    idxs = np.linspace(0, total - 1, min(n_frames, total)).astype(int)
+    frames = []
+    for idx in idxs:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        frame = cv2.resize(frame, (640, 480))
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frames.append(Image.fromarray(frame))
+    cap.release()
+    return frames
 
 def run_vsi_eval(
     model_name: str, out_dir: str, n_frames: int = 16, max_samples: int = None, batch_size: int = 4
@@ -53,47 +72,25 @@ def run_vsi_eval(
         return
 
     print(f"🚀 Loading model: {model_name}")
-    if "VL" in model_name:
-        from transformers import AutoProcessor, AutoModelForImageTextToText
+    from transformers import AutoProcessor, AutoModelForImageTextToText
 
-        processor = AutoProcessor.from_pretrained(
-            model_name, trust_remote_code=True, use_fast=True
-        )
-        model = AutoModelForImageTextToText.from_pretrained(
-            model_name,
-            dtype=torch.float16,
-            device_map="auto",
-            trust_remote_code=True,
-        )
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            dtype=torch.float16,
-            device_map="auto",
-            trust_remote_code=True,
-        )
+    processor = AutoProcessor.from_pretrained(
+        model_name, trust_remote_code=True, use_fast=True
+    )
+    
+    # Set left padding for decoder-only models during batch generation
+    processor.tokenizer.padding_side = "left"
+    if processor.tokenizer.pad_token is None:
+        processor.tokenizer.pad_token = processor.tokenizer.eos_token
+    
+    model = AutoModelForImageTextToText.from_pretrained(
+        model_name,
+        dtype=torch.float16,
+        device_map="auto",
+        trust_remote_code=True,
+    )
 
     model.eval()
-
-    def sample_frames(video_path: str, n_frames: int = 8):
-        cap = cv2.VideoCapture(video_path)
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total == 0:
-            cap.release()
-            print(f"⚠️ Empty or broken video: {video_path}")
-            return []
-        idxs = np.linspace(0, total - 1, min(n_frames, total)).astype(int)
-        frames = []
-        for idx in idxs:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-            ret, frame = cap.read()
-            if not ret:
-                continue
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(Image.fromarray(frame))
-        cap.release()
-        return frames
 
     print("🗂️ Grouping questions by video...")
     videos = defaultdict(list)
@@ -108,8 +105,9 @@ def run_vsi_eval(
     results = existing_results.copy()
     new_results = []
 
-    with torch.inference_mode():
-        for video_path, samples in tqdm(videos.items(), desc="Evaluating videos"):
+    pbar = tqdm(len(split), desc="Evaluating videos")
+    with torch.inference_mode(), pbar:
+        for video_path, samples in videos.items():
             if not os.path.exists(video_path):
                 print(f"⚠️ Missing: {video_path}")
                 continue
@@ -118,32 +116,34 @@ def run_vsi_eval(
             if not frames:
                 continue
 
-            # Filter out already completed samples
-            samples_to_process = [
-                row for row in samples 
-                if f"vsi_{row['id']}" not in completed_ids
-            ]
+            samples_to_process = []
+            for row in samples:
+                if f"vsi_{row['id']}" in completed_ids:
+                    pbar.update(1)
+                    continue
+                samples_to_process.append(row)
             
             if not samples_to_process:
+                pbar.update(len(samples))
                 continue
 
-            # Process samples in batches
             for batch_start in range(0, len(samples_to_process), batch_size):
                 batch_rows = samples_to_process[batch_start:batch_start + batch_size]
                 
-                # Prepare batch prompts and metadata
                 batch_prompts = []
                 batch_metadata = []
                 
                 for row in batch_rows:
                     q = row["question"]
-                    opts = row["options"]
+                    opts = row["options"] or []
                     gt = row["ground_truth"]
                     
-                    if not opts or len(opts) == 0:
-                        prompt = f"Question: {q}\nAnswer only with a numeric answer."
+                    pre_prompt = "These are frames of a video."
+                    if opts:
+                        options_str = " ".join(opts)
+                        prompt = f"{pre_prompt} {q} {options_str}\nAnswer with the option’s letter from the given choices directly."
                     else:
-                        prompt = f"Question: {q}\nOptions: {', '.join(opts)}\nAnswer only with the exact option text."
+                        prompt = f"{pre_prompt} {q}\nPlease answer the question using a single word or phrase."
                     
                     batch_prompts.append(prompt)
                     batch_metadata.append({
@@ -153,64 +153,40 @@ def run_vsi_eval(
                         "q": q
                     })
                 
-                # Generate predictions for batch
-                if "VL" in model_name:
-                    # For VL models, batch process with shared frames
-                    all_text_prompts = []
-                    for prompt in batch_prompts:
-                        messages = [
-                            {
-                                "role": "user",
-                                "content": (
-                                    [{"type": "image", "image": frame} for frame in frames]
-                                    + [{"type": "text", "text": prompt}]
-                                ),
-                            }
-                        ]
-                        text_prompt = processor.apply_chat_template(
-                            messages, tokenize=False, add_generation_prompt=True
-                        )
-                        all_text_prompts.append(text_prompt)
-                    
-                    # Batch process with padding
-                    inputs = processor(
-                        text=all_text_prompts, 
-                        images=[frames] * len(all_text_prompts),
-                        return_tensors="pt",
-                        padding=True
-                    ).to(DEVICE)
-                    
-                    outputs = model.generate(
-                        **inputs, 
-                        do_sample=False, 
-                        max_new_tokens=32,
-                        temperature=None,
-                        pad_token_id=processor.tokenizer.pad_token_id
+                all_text_prompts = []
+                for prompt in batch_prompts:
+                    messages = [
+                        {
+                            "role": "user",
+                            "content": (
+                                [{"type": "image", "image": frame} for frame in frames]
+                                + [{"type": "text", "text": prompt}]
+                            ),
+                        }
+                    ]
+                    text_prompt = processor.apply_chat_template(
+                        messages, tokenize=False, add_generation_prompt=True
                     )
-                    
-                    # Decode only generated tokens
-                    generated_ids = outputs[:, inputs["input_ids"].shape[1]:]
-                    predictions = processor.batch_decode(generated_ids, skip_special_tokens=True)
-                else:
-                    inputs = tokenizer(
-                        batch_prompts, 
-                        return_tensors="pt", 
-                        padding=True
-                    ).to(DEVICE)
-                    
-                    outputs = model.generate(
-                        **inputs, 
-                        do_sample=False, 
-                        max_new_tokens=32,
-                        temperature=None,
-                        pad_token_id=tokenizer.pad_token_id
-                    )
-                    
-                    # Decode only generated tokens
-                    generated_ids = outputs[:, inputs["input_ids"].shape[1]:]
-                    predictions = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
+                    all_text_prompts.append(text_prompt)
                 
-                # Process each prediction
+                # Batch process with padding
+                inputs = processor(
+                    text=all_text_prompts, 
+                    images=[frames] * len(all_text_prompts),
+                    return_tensors="pt",
+                    padding=True
+                ).to(DEVICE)
+                
+                outputs = model.generate(
+                    **inputs, 
+                    do_sample=False, 
+                    max_new_tokens=32,
+                    pad_token_id=processor.tokenizer.pad_token_id
+                )
+                
+                generated_ids = outputs[:, inputs["input_ids"].shape[1]:]
+                predictions = processor.batch_decode(generated_ids, skip_special_tokens=True)
+                
                 for meta, pred in zip(batch_metadata, predictions):
                     pred = pred.strip()
                     row = meta["row"]
@@ -219,26 +195,27 @@ def run_vsi_eval(
                     q = meta["q"]
                     qid = f"vsi_{row['id']}"
 
-                    if opts and len(opts) > 0:
-                        # Improved matching: look for option letter at start of prediction
+                    if opts:
+                        # Improved matching for MCA: expect letter, but handle variations
                         pred_upper = pred.upper()
-                        # Try to extract letter choice (A, B, C, D) from start of answer
-                        letter_match = re.match(r'^([A-D])[\.\)\:\s]', pred_upper)
+                        letter_match = re.match(r'^([A-D])[\.\)\:\s]?', pred_upper)
                         if letter_match:
                             pred_letter = letter_match.group(1)
                             # Find matching option
                             pred_text = next(
-                                (opt for opt in opts if opt.startswith(f"{pred_letter}.")), 
+                                (opt for opt in opts if opt.startswith(f"{pred_letter}.")),
                                 pred
                             )
                         else:
-                            # Fallback: try to match option text in prediction
                             pred_text = next(
-                                (opt for opt in opts if opt.split('. ', 1)[-1].lower() in pred.lower()), 
+                                (opt for opt in opts if opt.split('. ', 1)[-1].lower() in pred.lower()),
                                 pred
                             )
                         pred_text = pred_text.strip()
-                        correct = pred_text.lower() == gt.lower() or pred_text.startswith(f"{gt}.")
+
+                        pred_content = pred_text.split('. ', 1)[-1].lower()
+                        gt_content = gt.split('. ', 1)[-1].lower() if '.' in gt else gt.lower()
+                        correct = pred_content == gt_content or pred_text.lower() == gt.lower()
                     else:
                         pred_text = pred
                         try:
@@ -263,13 +240,19 @@ def run_vsi_eval(
                     if len(new_results) % 25 == 0:
                         with open(out_path, "w") as f:
                             json.dump(results + new_results, f, indent=2)
+                    pbar.update(1)
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
     results += new_results
     with open(out_path, "w") as f:
         json.dump(results, f, indent=2)
 
     print(f"✅ Saved {len(results)} total predictions to {out_path}")
-
+    
+    del model
+    gc.collect()
+    torch.cuda.empty_cache()
 
 if __name__ == "__main__":
     models = [
