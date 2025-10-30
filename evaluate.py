@@ -105,7 +105,10 @@ def run_vsi_eval(
     results = existing_results.copy()
     new_results = []
 
-    pbar = tqdm(len(split), desc="Evaluating videos")
+    pbar = tqdm(total=total_questions, desc="Evaluating videos")
+    for i in range(len(results)):
+        pbar.update(1)
+        
     with torch.inference_mode(), pbar:
         for video_path, samples in videos.items():
             if not os.path.exists(video_path):
@@ -258,6 +261,7 @@ if __name__ == "__main__":
     models = [
         "Qwen/Qwen2.5-VL-3B-Instruct",
         "Qwen/Qwen2.5-VL-7B-Instruct",
+        "Qwen/Qwen3-VL-2B-Instruct",
         "Qwen/Qwen3-VL-4B-Instruct",
         "Qwen/Qwen3-VL-8B-Instruct",
     ]
