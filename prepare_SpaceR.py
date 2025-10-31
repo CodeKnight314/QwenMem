@@ -36,15 +36,18 @@ def main():
             options_str = "\n".join([f"{option}" for i, option in enumerate(options)])
 
         record = {
-            "conversations": [
+            "messages": [
                 {
-                    "from": "human",
-                    "value": f"<video>{media_path}</video>\n{question}\n{options_str}"
+                    "content": f"<video>{question}\n{options_str}", 
+                    "role": "user"
                 },
                 {
-                    "from": "assistant",
-                    "value": answer
+                    "content": answer,
+                    "role": "assistant"
                 }
+            ],
+            "videos": [
+                media_path
             ]
         }
 
