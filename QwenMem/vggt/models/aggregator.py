@@ -8,12 +8,13 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from typing import Optional, Tuple, Union, List, Dict, Any
 
-from ..layers import PatchEmbed
-from ..layers.block import Block
-from ..layers.rope import RotaryPositionEmbedding2D, PositionGetter
-from ..layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
+from vggt.layers import PatchEmbed
+from vggt.layers.block import Block
+from vggt.layers.rope import RotaryPositionEmbedding2D, PositionGetter
+from vggt.layers.vision_transformer import vit_small, vit_base, vit_large, vit_giant2
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ class Aggregator(nn.Module):
     The Aggregator applies alternating-attention over input frames,
     as described in VGGT: Visual Geometry Grounded Transformer.
 
+    Remember to set model.train() to enable gradient checkpointing to reduce memory usage.
 
     Args:
         img_size (int): Image size in pixels.
@@ -69,7 +71,6 @@ class Aggregator(nn.Module):
     ):
         super().__init__()
 
-        self.embed_dim = embed_dim
         self.__build_patch_embed__(patch_embed, img_size, patch_size, num_register_tokens, embed_dim=embed_dim)
 
         # Initialize rotary position embedding if frequency > 0
@@ -134,15 +135,10 @@ class Aggregator(nn.Module):
         nn.init.normal_(self.register_token, std=1e-6)
 
         # Register normalization constants as buffers
-        for name, value in (
-            ("_resnet_mean", _RESNET_MEAN),
-            ("_resnet_std", _RESNET_STD),
-        ):
-            self.register_buffer(
-                name,
-                torch.FloatTensor(value).view(1, 1, 3, 1, 1),
-                persistent=False,
-            )
+        for name, value in (("_resnet_mean", _RESNET_MEAN), ("_resnet_std", _RESNET_STD)):
+            self.register_buffer(name, torch.FloatTensor(value).view(1, 1, 3, 1, 1), persistent=False)
+
+        self.use_reentrant = False # hardcoded to False
 
     def __build_patch_embed__(
         self,
@@ -185,10 +181,7 @@ class Aggregator(nn.Module):
             if hasattr(self.patch_embed, "mask_token"):
                 self.patch_embed.mask_token.requires_grad_(False)
 
-    def forward(
-        self,
-        images: torch.Tensor,
-    ) -> Tuple[List[torch.Tensor], int]:
+    def forward(self, images: torch.Tensor) -> Tuple[List[torch.Tensor], int]:
         """
         Args:
             images (torch.Tensor): Input images with shape [B, S, 3, H, W], in range [0, 1].
@@ -204,15 +197,6 @@ class Aggregator(nn.Module):
         if C_in != 3:
             raise ValueError(f"Expected 3 input channels, got {C_in}")
 
-        if self._resnet_mean.device != self.patch_embed.norm.weight.device:
-            self._resnet_mean = self._resnet_mean.to(self.patch_embed.norm.weight.device)
-        if self._resnet_std.device != self.patch_embed.norm.weight.device:
-            self._resnet_std = self._resnet_std.to(self.patch_embed.norm.weight.device)
-        if self._resnet_mean.dtype != self.patch_embed.norm.weight.dtype:
-            self._resnet_mean = self._resnet_mean.to(self.patch_embed.norm.weight.dtype)
-        if self._resnet_std.dtype != self.patch_embed.norm.weight.dtype:
-            self._resnet_std = self._resnet_std.to(self.patch_embed.norm.weight.dtype)
-            
         # Normalize images and reshape for patch embed
         images = (images - self._resnet_mean) / self._resnet_std
 
@@ -288,7 +272,10 @@ class Aggregator(nn.Module):
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
-            tokens = self.frame_blocks[frame_idx](tokens, pos=pos)
+            if self.training:
+                tokens = checkpoint(self.frame_blocks[frame_idx], tokens, pos, use_reentrant=self.use_reentrant)
+            else:
+                tokens = self.frame_blocks[frame_idx](tokens, pos=pos)
             frame_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
 
@@ -308,7 +295,10 @@ class Aggregator(nn.Module):
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
-            tokens = self.global_blocks[global_idx](tokens, pos=pos)
+            if self.training:
+                tokens = checkpoint(self.global_blocks[global_idx], tokens, pos, use_reentrant=self.use_reentrant)
+            else:
+                tokens = self.global_blocks[global_idx](tokens, pos=pos)
             global_idx += 1
             intermediates.append(tokens.view(B, S, P, C))
 
