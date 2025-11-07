@@ -2,11 +2,9 @@ import torch
 import torch.nn as nn
 from typing import Optional, Tuple, List, Union
 from dataclasses import dataclass
-from huggingface_hub import PyTorchModelHubMixin
 from modeling_qwen2_5_vl import (
+    Qwen2_5_VLForConditionalGeneration,
     Qwen2_5_VLPreTrainedModel,
-    Qwen2_5_VisionTransformerPretrainedModel,
-    Qwen2_5_VLModel,
     Qwen2_5_VLCausalLMOutputWithPast,
     Qwen2RMSNorm,
 )
@@ -15,7 +13,6 @@ from vggt.models.vggt import VGGT
 from transformers.generation import GenerationMixin
 from transformers.utils import (
     add_start_docstrings_to_model_forward,
-    replace_return_docstrings,
 )
 from torch.nn import CrossEntropyLoss
 from PIL import Image
@@ -292,17 +289,9 @@ QWEN2_5_VL_INPUTS_DOCSTRING = r"""
 class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
     config_class = Qwen2_5_VLConfig
-    _no_split_modules = ["Qwen2_5_VLDecoderLayer", "Qwen2_5_VLVisionBlock"]
 
     def __init__(self, config):
         super().__init__(config)
-        
-        # Base Qwen2.5-VL components
-        self.visual = Qwen2_5_VisionTransformerPretrainedModel._from_config(config.vision_config)
-        self.model = Qwen2_5_VLModel(config)
-        self.vocab_size = config.vocab_size
-        self.lm_head = nn.Linear(config.hidden_size, self.vocab_size, bias=False)
-        self.rope_deltas = None
 
         # VGGT integration
         vggt_config = VGGTMergerConfig(output_dim=config.hidden_size)
@@ -320,22 +309,23 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLPreTrainedModel, Ge
                 mlp_ratio=getattr(config, "memory_mlp_ratio", 4.0),
                 num_memory_tokens=getattr(config, "num_memory_tokens", 256)
             )
-        
-        self.post_init()
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-        model = super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
+        base = Qwen2_5_VLForConditionalGeneration.from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
         
-        print("Initializing VGGT encoder...")
-        model.vggt._initialize_vggt()
-        model.vggt.to(model.device)
+        self = cls(base.config)
 
-        if model.use_memory and model.memory.state.abs().sum() == 0:
-            print("Reinitializing memory state...")
-            model.memory.state.data = torch.randn_like(model.memory.state) * 0.02
+        self.visual = base.visual 
+        self.model = base.model
+        self.lm_head = base.lm_head
+
+        self.vggt._initialize_vggt()
+        self.vggt.to(base.device)
+
+        self.rope_deltas = None
         
-        return model
+        return self
 
     def get_input_embeddings(self):
         return self.model.get_input_embeddings()
@@ -663,8 +653,6 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLPreTrainedModel, Ge
         second_per_grid_ts=None,
         **kwargs,
     ):
-        # Overwritten -- in specific circumstances we don't want to forward image inputs to the model
-
         model_inputs = super().prepare_inputs_for_generation(
             input_ids,
             past_key_values=past_key_values,
@@ -681,7 +669,6 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLPreTrainedModel, Ge
             **kwargs,
         )
 
-        # Qwen2-5-VL position_ids are prepareed with rope_deltas in forward
         model_inputs["position_ids"] = None
 
         if cache_position[0] != 0:
