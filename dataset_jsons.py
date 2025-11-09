@@ -51,7 +51,7 @@ def create_data_json(choices: List[str], resume: bool = True):
         data.extend(json_data)
 
     # ---- setup output file ----
-    out_file_path = os.path.join(os.getcwd(), "train.jsonl")
+    out_file_path = os.path.join(os.getcwd(), "qwenmem_struct2d.json")
     
     # ---- check for existing progress ----
     existing_ids = set()
@@ -116,7 +116,7 @@ def create_data_json(choices: List[str], resume: bool = True):
             "messages": [
                 {
                     "role": "user",
-                    "content": question  # ← Simple string, not nested array
+                    "content": "<video>" + question  # ← Simple string, not nested array
                 },
                 {
                     "role": "assistant",

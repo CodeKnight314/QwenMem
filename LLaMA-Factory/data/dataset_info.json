@@ -745,8 +745,8 @@
       "assistant_tag": "assistant"
     }
   },
-  "qwen_qa": {
-    "file_name": "train.jsonl",
+  "qwenmem_struct2d_qa": {
+    "file_name": "qwenmem_struct2d.json",
     "formatting": "sharegpt",
     "columns": {
       "messages": "messages",
