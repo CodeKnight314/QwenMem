@@ -110,20 +110,33 @@ def create_data_json(choices: List[str], resume: bool = True):
 
         frames_32 = evenly_sample_frames(all_frames, 32)
 
-        # LlamaFactory-compatible format
+        # Build user content with all frames as images
+        user_content = []
+        for frame_path in frames_32:
+            user_content.append({
+                "type": "image",
+                "image": frame_path
+            })
+        
+        # Add the question text (remove <video> tag)
+        user_content.append({
+            "type": "text",
+            "text": question
+        })
+
+        # LlamaFactory-compatible format for Qwen2.5-VL
         entry = {
             "id": sample_id,
             "messages": [
                 {
                     "role": "user",
-                    "content": "<video>" + question  # ← Simple string, not nested array
+                    "content": user_content  # ← List of dicts with type + image/text
                 },
                 {
                     "role": "assistant",
-                    "content": answer  # ← Simple string, not nested array
+                    "content": answer  # ← Simple string
                 }
-            ],
-            "videos": [frames_32]  # ← Top-level videos key (list of video frame lists)
+            ]
         }
         out_file.write(json.dumps(entry) + "\n")
         out_file.flush()  # Ensure data is written immediately
