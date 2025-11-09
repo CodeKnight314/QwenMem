@@ -39,7 +39,7 @@ def load_existing_ids(file_path: str) -> Set[str]:
     
     return existing_ids
 
-def create_data_json(choices: List[str], resume: bool = True):
+def create_data_json(choices: List[str], resume: bool = True, nframes: int = 32):
     data = []
     # ---- merge all QA files ----
     for choice in choices:
@@ -51,7 +51,7 @@ def create_data_json(choices: List[str], resume: bool = True):
         data.extend(json_data)
 
     # ---- setup output file ----
-    out_file_path = os.path.join(os.getcwd(), "qwenmem_struct2d.json")
+    out_file_path = os.path.join(os.getcwd(), f"qwenmem_nframes_{nframes}.json")
     
     # ---- check for existing progress ----
     existing_ids = set()
@@ -108,38 +108,28 @@ def create_data_json(choices: List[str], resume: bool = True):
             errors += 1
             continue
 
-        frames_32 = evenly_sample_frames(all_frames, 32)
+        frames_32 = evenly_sample_frames(all_frames, nframes)
 
-        # Build user content with all frames as images
-        user_content = []
-        for frame_path in frames_32:
-            user_content.append({
-                "type": "image",
-                "image": frame_path
-            })
+        # Create image placeholder string with all 32 <image> tags
+        image_tags = "<image>" * nframes
         
-        # Add the question text (remove <video> tag)
-        user_content.append({
-            "type": "text",
-            "text": question
-        })
-
-        # LlamaFactory-compatible format for Qwen2.5-VL
+        # LlamaFactory format: simple string content with <image> tags
         entry = {
-            "id": sample_id,
             "messages": [
                 {
-                    "role": "user",
-                    "content": user_content  # ← List of dicts with type + image/text
+                    "content": image_tags + question,  # All image tags followed by question
+                    "role": "user"
                 },
                 {
-                    "role": "assistant",
-                    "content": answer  # ← Simple string
+                    "content": answer,  # Simple string
+                    "role": "assistant"
                 }
-            ]
+            ],
+            "images": frames_32  # Flat list of image paths
         }
+        
         out_file.write(json.dumps(entry) + "\n")
-        out_file.flush()  # Ensure data is written immediately
+        out_file.flush()
         processed += 1
 
     out_file.close()
@@ -157,7 +147,8 @@ def create_data_json(choices: List[str], resume: bool = True):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Create training data JSONL with resume capability")
+    parser.add_argument("--nframes", type=int, default=32, help="Number of frames to sample")
     parser.add_argument("--no-resume", action="store_true", help="Start fresh, overwriting existing file")
     args = parser.parse_args()
     
-    create_data_json(CHOICES, resume=not args.no_resume)
+    create_data_json(CHOICES, resume=not args.no_resume, nframes=args.nframes)

@@ -750,7 +750,7 @@
     "formatting": "sharegpt",
     "columns": {
       "messages": "messages",
-      "videos": "videos"
+      "images": "images"
     },
     "tags": {
       "role_tag": "role",
