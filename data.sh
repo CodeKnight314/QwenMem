@@ -2,9 +2,9 @@
 
 source activate conda_env/qwenmem/
 
-python dataset_jsons.py --nframes 32
-python dataset_jsons.py --nframes 16
-python dataset_jsons.py --nframes 8
+python scripts/dataset_jsons.py --nframes 32
+python scripts/dataset_jsons.py --nframes 16
+python scripts/dataset_jsons.py --nframes 8
 
 mv qwenmem_nframes_32.json LLaMA-Factory/data/qwenmem_nframes_32.json
 mv qwenmem_nframes_16.json LLaMA-Factory/data/qwenmem_nframes_16.json
