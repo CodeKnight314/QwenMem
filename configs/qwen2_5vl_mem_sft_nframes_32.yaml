@@ -1,5 +1,6 @@
 ## model 
 model_name_or_path: Qwen/Qwen2.5-VL-3B-Instruct
+model_class: QwenMem.modeling_qwen2_5_vl_with_memory.Qwen2_5_VLForConditionalGenerationWithMemory
 image_max_pixels: 262144
 video_max_pixels: 16384
 trust_remote_code: true
@@ -12,7 +13,7 @@ lora_rank: 8
 lora_target: all
 
 ## dataset
-dataset: qwenmem_nframes_16
+dataset: qwenmem_nframes_32
 template: qwen2_vl
 cutoff_len: 4096
 max_samples: 1000
@@ -21,7 +22,7 @@ preprocessing_num_workers: 16
 dataloader_num_workers: 2
 
 ## output
-output_dir: saves/qwen2_5vl-3b/sft/nframes_16
+output_dir: saves/qwen2_5vl-3b/sft/nframes_32
 logging_steps: 10
 save_steps: 500
 plot_loss: true

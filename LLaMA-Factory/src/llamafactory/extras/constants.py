@@ -3760,3 +3760,16 @@ register_model_group(
     },
     template="zephyr",
 )
+
+register_model_group(
+    models={
+        "Qwen2_5_VLWithMemory": {
+            DownloadSource.DEFAULT: "qwenmem/weights/Qwen2_5_VLWithMemory",
+        },
+        "Qwen2_5_VLWithVGGT": {
+            DownloadSource.DEFAULT: "qwenmem/weights/Qwen2_5_VLWithVGGT",
+        },
+    },
+    template="qwen2_vl",
+    multimodal=True,
+)

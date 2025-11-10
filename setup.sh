@@ -1,7 +1,5 @@
 #! /bin/bash
 
-source activate conda_env/qwenmem/
-
 python scripts/dataset_jsons.py --nframes 32
 python scripts/dataset_jsons.py --nframes 16
 python scripts/dataset_jsons.py --nframes 8
@@ -12,3 +10,7 @@ mv qwenmem_nframes_8.json LLaMA-Factory/data/qwenmem_nframes_8.json
 
 cd LLaMA-Factory/
 pip install -e ".[torch,metrics]" --no-build-isolation
+
+cd ..
+
+mv src/QwenMem/ LLaMA-Factory/src/qwenmem/
