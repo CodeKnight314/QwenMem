@@ -1,0 +1,7 @@
+{
+    "architectures": ["Qwen2_5_VLForConditionalGenerationWithVGGT"],
+    "model_type": "qwen2_5_vl",
+    "auto_map": {
+      "AutoModelForVision2Seq": "qwenmem.modeling_qwen2_5_vl_with_memory.Qwen2_5_VLForConditionalGenerationWithMemory"
+    }
+  }

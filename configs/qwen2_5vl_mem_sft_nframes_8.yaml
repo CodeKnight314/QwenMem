@@ -1,6 +1,5 @@
 ## model 
-model_name_or_path: Qwen/Qwen2.5-VL-3B-Instruct
-model_class: QwenMem.modeling_qwen2_5_vl_with_memory.Qwen2_5_VLForConditionalGenerationWithMemory
+model_name_or_path: Qwen2_5_VLWithMemory
 image_max_pixels: 262144
 video_max_pixels: 16384
 trust_remote_code: true
