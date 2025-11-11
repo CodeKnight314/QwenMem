@@ -3764,10 +3764,10 @@ register_model_group(
 register_model_group(
     models={
         "Qwen2_5_VLWithMemory": {
-            DownloadSource.DEFAULT: "QwenMem/weights/Qwen2_5_VLWithMemory",
+            DownloadSource.DEFAULT: "src/qwenmem/weights/Qwen2_5_VLWithMemory",
         },
         "Qwen2_5_VLWithVGGT": {
-            DownloadSource.DEFAULT: "Qwenmem/weights/Qwen2_5_VLWithVGGT",
+            DownloadSource.DEFAULT: "src/qwenmem/weights/Qwen2_5_VLWithVGGT",
         },
     },
     template="qwen2_vl",
