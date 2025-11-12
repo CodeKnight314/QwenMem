@@ -13,4 +13,10 @@ pip install -e ".[torch,metrics]" --no-build-isolation
 
 cd ..
 
-mv src/QwenMem/ LLaMA-Factory/src/qwenmem/
+git clone https://huggingface.co/Codeknight314/Qwen2_5_VL-3B-WithMemory
+git clone https://huggingface.co/Codeknight314/Qwen2_5_VL-3B-WithVGGT
+
+mkdir -p LLaMA-Factory/models
+
+mv Qwen2_5_VL-3B-WithMemory LLaMA-Factory/models/
+mv Qwen2_5_VL-3B-WithVGGT   LLaMA-Factory/models/

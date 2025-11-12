@@ -3763,13 +3763,17 @@ register_model_group(
 
 register_model_group(
     models={
-        "Qwen2_5_VLWithMemory": {
-            DownloadSource.DEFAULT: "src/qwenmem/weights/Qwen2_5_VLWithMemory",
+        "Qwen2_5_VL-3B-WithMemory": {
+            "model_type": "qwen2_vl",
+            "model_name_or_path": "./models/Qwen2_5_VL-3B-WithMemory",
+            "template": "qwen2_vl",
+            "multimodal": True,
         },
-        "Qwen2_5_VLWithVGGT": {
-            DownloadSource.DEFAULT: "src/qwenmem/weights/Qwen2_5_VLWithVGGT",
+        "Qwen2_5_VL-3B-WithVGGT": {
+            "model_type": "qwen2_vl",
+            "model_name_or_path": "./models/Qwen2_5_VL-3B-WithVGGT",
+            "template": "qwen2_vl",
+            "multimodal": True,
         },
-    },
-    template="qwen2_vl",
-    multimodal=True,
+    }
 )
