@@ -1,5 +1,5 @@
 ## model 
-model_name_or_path: Qwen2_5_VL-3B-WithVGGT
+model_name_or_path: /projects/vig/tangri/QwenMem/LLaMA-Factory/models/Qwen2_5_VL-3B-WithVGGT
 image_max_pixels: 262144
 video_max_pixels: 16384
 trust_remote_code: true
@@ -17,7 +17,7 @@ template: qwen2_vl
 cutoff_len: 4096
 max_samples: 1000
 overwrite_cache: true
-preprocessing_num_workers: 16
+preprocessing_num_workers: 4
 dataloader_num_workers: 2
 
 ## output
@@ -27,7 +27,7 @@ save_steps: 500
 plot_loss: true
 overwrite_output_dir: true
 save_only_model: false
-report_to: none  # choices: [none, wandb, tensorboard, swanlab, mlflow]
+report_to: wandb  # choices: [none, wandb, tensorboard, swanlab, mlflow]
 
 ## train
 per_device_train_batch_size: 1
