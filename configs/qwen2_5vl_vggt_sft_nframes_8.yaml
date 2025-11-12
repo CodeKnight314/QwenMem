@@ -9,15 +9,20 @@ stage: sft
 do_train: true
 finetuning_type: lora
 lora_rank: 8
-lora_target: all
+lora_target: [
+  "q_proj", "k_proj", "v_proj", "o_proj",
+  "gate_proj", "up_proj", "down_proj",
+  "vggt.vgg_to_language_mlp.0", "vggt.vgg_to_language_mlp.2",
+  "vggt.token_merge_mlp.0", "vggt.token_merge_mlp.2"
+]
 
 ## dataset
 dataset: qwenmem_nframes_8
 template: qwen2_vl
 cutoff_len: 4096
 max_samples: 1000
-overwrite_cache: true
-preprocessing_num_workers: 16
+overwrite_cache: false
+preprocessing_num_workers: 4
 dataloader_num_workers: 2
 
 ## output
