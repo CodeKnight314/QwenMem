@@ -26,7 +26,7 @@ preprocessing_num_workers: 4
 dataloader_num_workers: 2
 
 ## output
-output_dir: saves/qwen2_5vl-3b/sft/nframes_8
+output_dir: saves/qwen2_5vl-3b/sft/vggt/nframes_8
 logging_steps: 10
 save_steps: 500
 plot_loss: true

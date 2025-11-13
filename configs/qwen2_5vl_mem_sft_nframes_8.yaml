@@ -12,9 +12,15 @@ lora_rank: 8
 lora_target: [
   "q_proj", "k_proj", "v_proj", "o_proj",
   "gate_proj", "up_proj", "down_proj",
-  "memory.memory_to_language_mlp.0", "memory.memory_to_language_mlp.2",
-  "memory.token_merge_mlp.0", "memory.token_merge_mlp.2"
+  "vggt.vgg_to_language_mlp.0", "vggt.vgg_to_language_mlp.2",
+  "vggt.token_merge_mlp.0", "vggt.token_merge_mlp.2",
+  "memory.state_tokens_attn", "memory.tokens_state_attn",
+  "memory.state_ffn", "memory.tokens_ffn",
+  "memory.norm_state_1", "memory.norm_state_2",
+  "memory.norm_tokens_1", "memory.norm_tokens_2",
+  "memory.gate"
 ]
+
 
 ## dataset
 dataset: qwenmem_nframes_8
@@ -26,7 +32,7 @@ preprocessing_num_workers: 16
 dataloader_num_workers: 2
 
 ## output
-output_dir: saves/qwen2_5vl-3b/sft/nframes_8
+output_dir: saves/qwen2_5vl-3b/sft/memory/nframes_8
 logging_steps: 10
 save_steps: 500
 plot_loss: true
