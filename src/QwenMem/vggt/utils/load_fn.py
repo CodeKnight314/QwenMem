@@ -142,7 +142,12 @@ def load_and_preprocess_images(image_path_list, mode="crop"):
     # First process all images and collect their shapes
     for image_path in image_path_list:
         # Open image
-        img = Image.open(image_path)
+        if isinstance(image_path, str):
+            img = Image.open(image_path)
+        elif isinstance(image_path, Image.Image):
+            img = image_path
+        else:
+            raise ValueError(f"Invalid image type: {type(image_path)}")
 
         # If there's an alpha channel, blend onto white background:
         if img.mode == "RGBA":

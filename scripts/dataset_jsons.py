@@ -9,7 +9,7 @@ ARKITSCENE_DATA_ROOT = "/projects/vig/Datasets/ARKitScenes/3dod/Training"
 SCANNETPP_DATA_ROOT = "/projects/vig/Datasets/ScanNetpp/data"
 
 CHOICES = [
-    "object_rel_direction", 
+    "object_counting", 
 ]
 
 def load_json(path: str):

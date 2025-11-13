@@ -19,7 +19,7 @@ lora_target: [
 ## dataset
 dataset: qwenmem_nframes_16
 template: qwen2_vl
-cutoff_len: 4096
+cutoff_len: 16384
 max_samples: 1000
 overwrite_cache: false
 preprocessing_num_workers: 16
@@ -32,7 +32,7 @@ save_steps: 500
 plot_loss: true
 overwrite_output_dir: true
 save_only_model: false
-report_to: none  # choices: [none, wandb, tensorboard, swanlab, mlflow]
+report_to: wandb  # choices: [none, wandb, tensorboard, swanlab, mlflow]
 
 ## train
 per_device_train_batch_size: 1

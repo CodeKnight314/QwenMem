@@ -1,4 +1,6 @@
+from huggingface_hub import pause_space
 import torch
+from torch._inductor.utils import aggregate_origins
 import torch.nn as nn
 from typing import Optional, Tuple, List, Union
 from dataclasses import dataclass
@@ -25,7 +27,6 @@ class VGGTMergerConfig:
     patch_size: int = 14
     temporal_merge_size: int = 2
     spatial_merge_size: int = 2
-
 
 class VGGTMerger(nn.Module):
     def __init__(self, config: VGGTMergerConfig):
@@ -118,6 +119,7 @@ class VGGTEncoder(nn.Module):
         self,
         config: VGGTMergerConfig,
         freeze: bool = True,
+        target_size: int = 518,
     ):
         super().__init__()
         
@@ -128,6 +130,7 @@ class VGGTEncoder(nn.Module):
         # Don't initialize VGGT yet - will be done later
         self.model = None
         self.merger = VGGTMerger(config)
+        self.target_size = target_size
         
     def _initialize_vggt(self):
         """Initialize VGGT model - called after parent model is loaded"""
@@ -142,25 +145,113 @@ class VGGTEncoder(nn.Module):
     
     def _preprocess_images(self, images: List[Image.Image]) -> torch.Tensor:
         return load_and_preprocess_images(images)
+    
+    def _adjust_to_patch_size(self, size: int):
+        return (size // 14) * 14
+ 
+    def _preprocess_tensor(self, pixel_values: torch.Tensor, mode: str = "pad") -> torch.Tensor:
+        assert pixel_values.ndim == 4 or pixel_values.ndim == 5, f"Invalid shape of tensor: {pixel_values.shape}"
+        
+        is_video = pixel_values.ndim == 5
+
+        if pixel_values.ndim == 4:
+            pixel_values = pixel_values.unsqueeze(1)
+            pixel_values = pixel_values.repeat_interleave(2, dim=1)
+
+        B, F, C, H, W = pixel_values.shape
+
+        pixel_values = pixel_values.view(B * F, C, H, W)
+
+        target_size = self._adjust_to_patch_size(self.target_size)
+
+        if mode == "pad":
+            max_dim = max(H, W)
+            scale = target_size / max_dim
+
+            new_h = self._adjust_to_patch_size(int(H * scale))
+            new_w = self._adjust_to_patch_size(int(W * scale))
+
+            pixel_values = torch.nn.functional.interpolate(
+                pixel_values, 
+                size=(new_h, new_w), 
+                mode="bilinear", 
+                align_corners=True
+            )
+
+            pad_h = (target_size - new_h) // 2
+            pad_w = (target_size - new_w) // 2
+            pixel_values = torch.nn.functional.pad(
+                pixel_values,
+                (pad_w, target_size - new_w - pad_w, pad_h, target_size - new_h - pad_h),
+                value=1.0
+            )
+        else:
+            scale = target_size / W
+            new_h = int(H * scale)
+            new_w = target_size
+            
+            pixel_values = torch.nn.functional.interpolate(
+                pixel_values,
+                size=(new_h, new_w),
+                mode='bilinear',
+                align_corners=False
+            )
+            
+            if new_h > target_size:
+                start_h = (new_h - target_size) // 2
+                pixel_values = pixel_values[:, :, start_h:start_h + target_size, :]
+            else:
+                pad_h = (target_size - new_h) // 2
+                pixel_values = torch.nn.functional.pad(
+                    pixel_values,
+                    (0, 0, pad_h, target_size - new_h - pad_h),
+                    value=1.0
+                )
+        
+        final_h = self._adjust_to_patch_size(pixel_values.shape[2])
+        final_w = self._adjust_to_patch_size(pixel_values.shape[3])
+        if pixel_values.shape[2] != final_h or pixel_values.shape[3] != final_w:
+            pixel_values = torch.nn.functional.interpolate(
+                pixel_values,
+                size=(final_h, final_w),
+                mode='bilinear',
+                align_corners=False
+            )
+        
+        pixel_values = pixel_values.view(B, F, C, final_h, final_w)
+                
+        return pixel_values
 
     def forward(
         self, 
-        images: List[Image.Image], 
-        media_type: str = "video"
+        pixel_values: torch.Tensor,
+        media_type: str = "video",
+        preprocessing_mode: str = "pad"
     ) -> torch.Tensor:
-        # Lazy initialization on first forward pass
         if self.model is None:
             self._initialize_vggt()
         
-        images_tensor = self._preprocess_images(images).unsqueeze(0).to(self.device)
-        images_shape = images_tensor.shape[-2:]
-        
-        aggregated_tokens_list, patch_start_idx = self.model.aggregator(images_tensor)
+        if media_type == "auto":
+            if pixel_values.ndim == 4:
+                media_type = "images"
+            else: 
+                media_type = "video"
+
+        pixel_values = self._preprocess_tensor(pixel_values, preprocessing_mode)
+
+        pixel_values = pixel_values.to(self.device)
+
+        img_shape = pixel_values.shape[-2:]
+
+        B, T = pixel_values.shape[:2]
+        pixel_values_flat = pixel_values.view(B, T, -1, img_shape[0], img_shape[1])
+
+        aggregated_tokens_list, patch_start_idx = self.model.aggregator(pixel_values_flat)
 
         output = self.merger(
             aggregated_tokens_list=aggregated_tokens_list,
             patch_start_idx=patch_start_idx,
-            images_shape=images_shape,
+            images_shape=img_shape,
             media_type=media_type,
         )
         
@@ -220,7 +311,6 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
         second_per_grid_ts: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # [Your existing implementation stays exactly the same]
         spatial_merge_size = self.config.vision_config.spatial_merge_size
         image_token_id = self.config.image_token_id
         video_token_id = self.config.video_token_id
@@ -357,7 +447,6 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
         rope_deltas: Optional[torch.LongTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
         second_per_grid_ts: Optional[torch.Tensor] = None,
-        images_vggt: Optional[List[Image.Image]] = None,
         **kwargs,
     ) -> Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:
 
@@ -371,20 +460,19 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
             inputs_embeds = self.model.get_input_embeddings()(input_ids)
             
             if pixel_values is not None:
-                pixel_values = pixel_values.type(self.visual.dtype)
+                pixel_values = pixel_values.type(self.visual.dtype) # [F, 3, H, W]
                 
                 image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
                 
-                if images_vggt is not None:
-                    try:
-                        vggt_features = self.vggt.forward(images_vggt, media_type="images")
-                        vggt_features = vggt_features.view(-1, vggt_features.shape[-1])
-                        
-                        if vggt_features.shape[0] == image_embeds.shape[0]:
-                            image_embeds = image_embeds + self.vggt_fusion_weight * vggt_features
-                    except Exception as e:
-                        print(f"Warning: VGGT processing failed: {e}")
-                
+                try:
+                    vggt_features = self.vggt(pixel_values, media_type="images")
+                    vggt_features = vggt_features.view(-1, vggt_features.shape[-1]) #[F, D]
+                    
+                    if vggt_features.shape[0] == image_embeds.shape[0]:
+                        image_embeds = image_embeds + self.vggt_fusion_weight * vggt_features
+                except Exception as e:
+                    print(f"Warning: VGGT processing failed: {e}")
+
                 mask = input_ids == self.config.image_token_id
                 image_mask = mask.unsqueeze(-1).expand_as(inputs_embeds)
                 image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
@@ -393,6 +481,16 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
             if pixel_values_videos is not None:
                 pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
                 video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
+
+                try: 
+                    vggt_features = self.vggt(pixel_values_videos, media_type="video")
+                    vggt_features = vggt_features.view(-1, vggt_features.shape[-1]) #[F, D]
+                    
+                    if vggt_features.shape[0] == video_embeds.shape[0]:
+                        video_embeds = video_embeds + self.vggt_fusion_weight * vggt_features
+                except Exception as e:
+                    print(f"Warning: VGGT processing failed: {e}")
+                
                 mask = input_ids == self.config.video_token_id
                 video_mask = mask.unsqueeze(-1).expand_as(inputs_embeds)
                 video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
@@ -430,7 +528,6 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
-            images_vggt=images_vggt,
         )
         
         hidden_states = outputs[0]
