@@ -1,5 +1,5 @@
 ## model 
-model_name_or_path: /projects/vig/tangri/QwenMem/LLaMA-Factory/models/Qwen2_5_VL-3B-WithVGGT
+model_name_or_path: /projects/vig/tangri/QwenMem/LLaMA-Factory/models/Qwen2_5_VL-3B-WithMemory
 image_max_pixels: 262144
 video_max_pixels: 16384
 trust_remote_code: true
@@ -7,14 +7,13 @@ trust_remote_code: true
 ## method
 stage: sft
 do_train: true
-finetuning_type: lora
-lora_rank: 8
-lora_target: [
-  "q_proj", "k_proj", "v_proj", "o_proj",
-  "gate_proj", "up_proj", "down_proj",
-  "vggt.vgg_to_language_mlp.0", "vggt.vgg_to_language_mlp.2",
-  "vggt.token_merge_mlp.0", "vggt.token_merge_mlp.2"
+finetuning_type: freeze
+freeze_target: [
+  "memory",
+  "merger",
 ]
+
+
 
 ## dataset
 dataset: qwenmem_nframes_32
@@ -22,11 +21,11 @@ template: qwen2_vl
 cutoff_len: 16384
 max_samples: 1000
 overwrite_cache: false
-preprocessing_num_workers: 4
+preprocessing_num_workers: 16
 dataloader_num_workers: 2
 
 ## output
-output_dir: saves/qwen2_5vl-3b/sft/vggt/nframes_32
+output_dir: saves/qwen2_5vl-3b/sft/memory/nframes_32
 logging_steps: 10
 save_steps: 500
 plot_loss: true
