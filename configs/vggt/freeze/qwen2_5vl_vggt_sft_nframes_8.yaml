@@ -8,16 +8,15 @@ trust_remote_code: true
 stage: sft
 do_train: true
 finetuning_type: freeze
-freeze_target: [
-  "merger"
-]
+freeze_trainable_layers: 0
+freeze_trainable_modules: all
+freeze_extra_modules: token_merge_ln_q, vgg_to_language_ln_q, vgg_to_language_mlp, token_merge_mlp
 
 
 ## dataset
 dataset: qwenmem_nframes_8
 template: qwen2_vl
 cutoff_len: 16384
-max_samples: 1000
 overwrite_cache: false
 preprocessing_num_workers: 4
 dataloader_num_workers: 2

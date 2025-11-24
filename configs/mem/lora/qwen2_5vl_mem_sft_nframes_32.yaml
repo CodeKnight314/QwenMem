@@ -9,31 +9,22 @@ stage: sft
 do_train: true
 finetuning_type: lora
 lora_rank: 8
-lora_target: [
-  "q_proj", "k_proj", "v_proj", "o_proj",
-  "gate_proj", "up_proj", "down_proj",
-  "merger.token_merge_mlp.0", "merger.token_merge_mlp.2", 
-  "merger.vgg_to_language_mlp.0", "merger.vgg_to_language_mlp.2",
-  "memory.state_tokens_attn", "memory.tokens_state_attn",
-  "memory.state_ffn.0", "memory.tokens_ffn.0",
-  "memory.state_ffn.2", "memory.tokens_ffn.2",
-  "memory.gate"
-]
-
+lora_target: q_proj,k_proj,v_proj,o_proj
+additional_target: token_merge_ln_q, vgg_to_language_ln_q, vgg_to_language_mlp, token_merge_mlp, decoder_embed_state, decoder_embed_visual
+deepspeed: /projects/vig/tangri/QwenMem/LLaMA-Factory/examples/deepspeed/ds_z3_config.json
 
 ## dataset
 dataset: qwenmem_nframes_32
 template: qwen2_vl
 cutoff_len: 16384
-max_samples: 1000
 overwrite_cache: false
-preprocessing_num_workers: 16
+preprocessing_num_workers: 8
 dataloader_num_workers: 2
 
 ## output
 output_dir: saves/qwen2_5vl-3b/sft/memory/nframes_32
-logging_steps: 10
-save_steps: 500
+logging_steps: 5
+save_steps: 20
 plot_loss: true
 overwrite_output_dir: true
 save_only_model: false
@@ -41,9 +32,9 @@ report_to: wandb  # choices: [none, wandb, tensorboard, swanlab, mlflow]
 
 ## train
 per_device_train_batch_size: 1
-gradient_accumulation_steps: 16
+gradient_accumulation_steps: 32
 learning_rate: 1.0e-4
-num_train_epochs: 3.0
+num_train_epochs: 2.0
 lr_scheduler_type: cosine
 warmup_ratio: 0.1
 bf16: true

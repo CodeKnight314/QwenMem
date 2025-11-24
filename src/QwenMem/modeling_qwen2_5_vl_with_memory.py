@@ -1,22 +1,24 @@
+from huggingface_hub import pause_space
 import torch
+from torch._inductor.utils import aggregate_origins
 import torch.nn as nn
 from typing import Optional, Tuple, List, Union
 from dataclasses import dataclass
-from modeling_qwen2_5_vl import (
+from .modeling_qwen2_5_vl import (
     Qwen2_5_VLForConditionalGeneration,
     Qwen2_5_VLPreTrainedModel,
     Qwen2_5_VLCausalLMOutputWithPast,
     Qwen2RMSNorm,
 )
-from configuration_qwen2_5_vl import Qwen2_5_VLConfig
-from vggt.models.vggt import VGGT
+from .configuration_qwen2_5_vl import Qwen2_5_VLConfig
+from .memory import CUT3RStyleMemory
+from .vggt import VGGT
 from transformers.generation import GenerationMixin
 from transformers.utils import (
     add_start_docstrings_to_model_forward,
 )
 from torch.nn import CrossEntropyLoss
 from PIL import Image
-from vggt.utils.load_fn import load_and_preprocess_images
 
 @dataclass
 class VGGTMergerConfig:
@@ -25,7 +27,6 @@ class VGGTMergerConfig:
     patch_size: int = 14
     temporal_merge_size: int = 2
     spatial_merge_size: int = 2
-
 
 class VGGTMerger(nn.Module):
     def __init__(self, config: VGGTMergerConfig):
@@ -40,18 +41,15 @@ class VGGTMerger(nn.Module):
             self.input_dim * self.temporal_merge_size * (self.spatial_merge_size ** 2)
         )
         self.token_merge_ln_q = Qwen2RMSNorm(self.token_merge_in_dim)
-        self.token_merge_mlp = nn.Sequential(
-            nn.Linear(self.token_merge_in_dim, self.token_merge_in_dim),
-            nn.GELU(),
-            nn.Linear(self.token_merge_in_dim, self.output_dim),
-        )
+        # self.token_merge_mlp = nn.Sequential(
+        #     nn.Linear(self.token_merge_in_dim, self.token_merge_in_dim),
+        #     nn.GELU(),
+        #     nn.Linear(self.token_merge_in_dim, self.output_dim),
+        # )
+        self.token_merge_mlp = nn.Linear(self.token_merge_in_dim, self.output_dim)
 
         self.vgg_to_language_ln_q = Qwen2RMSNorm(self.output_dim)
-        self.vgg_to_language_mlp = nn.Sequential(
-            nn.Linear(self.output_dim, self.output_dim),
-            nn.GELU(),
-            nn.Linear(self.output_dim, self.output_dim),
-        )
+        self.vgg_to_language_mlp = nn.Linear(self.output_dim, self.output_dim)
 
     def merge_tokens(self, tokens: torch.Tensor, images_shape: Tuple) -> torch.Tensor:
         H, W = images_shape[-2:]
@@ -118,6 +116,7 @@ class VGGTEncoder(nn.Module):
         self,
         config: VGGTMergerConfig,
         freeze: bool = True,
+        target_size: int = 518,
     ):
         super().__init__()
         
@@ -128,6 +127,7 @@ class VGGTEncoder(nn.Module):
         # Don't initialize VGGT yet - will be done later
         self.model = None
         self.merger = VGGTMerger(config)
+        self.target_size = target_size
         
     def _initialize_vggt(self):
         """Initialize VGGT model - called after parent model is loaded"""
@@ -140,27 +140,113 @@ class VGGTEncoder(nn.Module):
                 for param in self.model.parameters():
                     param.requires_grad = False
     
-    def _preprocess_images(self, images: List[Image.Image]) -> torch.Tensor:
-        return load_and_preprocess_images(images)
+    def _adjust_to_patch_size(self, size: int):
+        return (size // 14) * 14
+ 
+    def _preprocess_tensor(self, pixel_values: torch.Tensor, mode: str = "pad") -> torch.Tensor:
+        assert pixel_values.ndim == 4 or pixel_values.ndim == 5, f"Invalid shape of tensor: {pixel_values.shape}"
+        
+        is_video = pixel_values.ndim == 5
+
+        if pixel_values.ndim == 4:
+            pixel_values = pixel_values.unsqueeze(1)
+            pixel_values = pixel_values.repeat_interleave(2, dim=1)
+
+        B, F, C, H, W = pixel_values.shape
+
+        pixel_values = pixel_values.view(B * F, C, H, W)
+
+        target_size = self._adjust_to_patch_size(self.target_size)
+
+        if mode == "pad":
+            max_dim = max(H, W)
+            scale = target_size / max_dim
+
+            new_h = self._adjust_to_patch_size(int(H * scale))
+            new_w = self._adjust_to_patch_size(int(W * scale))
+
+            pixel_values = torch.nn.functional.interpolate(
+                pixel_values, 
+                size=(new_h, new_w), 
+                mode="bilinear", 
+                align_corners=True
+            )
+
+            pad_h = (target_size - new_h) // 2
+            pad_w = (target_size - new_w) // 2
+            pixel_values = torch.nn.functional.pad(
+                pixel_values,
+                (pad_w, target_size - new_w - pad_w, pad_h, target_size - new_h - pad_h),
+                value=1.0
+            )
+        else:
+            scale = target_size / W
+            new_h = int(H * scale)
+            new_w = target_size
+            
+            pixel_values = torch.nn.functional.interpolate(
+                pixel_values,
+                size=(new_h, new_w),
+                mode='bilinear',
+                align_corners=False
+            )
+            
+            if new_h > target_size:
+                start_h = (new_h - target_size) // 2
+                pixel_values = pixel_values[:, :, start_h:start_h + target_size, :]
+            else:
+                pad_h = (target_size - new_h) // 2
+                pixel_values = torch.nn.functional.pad(
+                    pixel_values,
+                    (0, 0, pad_h, target_size - new_h - pad_h),
+                    value=1.0
+                )
+        
+        final_h = self._adjust_to_patch_size(pixel_values.shape[2])
+        final_w = self._adjust_to_patch_size(pixel_values.shape[3])
+        if pixel_values.shape[2] != final_h or pixel_values.shape[3] != final_w:
+            pixel_values = torch.nn.functional.interpolate(
+                pixel_values,
+                size=(final_h, final_w),
+                mode='bilinear',
+                align_corners=False
+            )
+        
+        pixel_values = pixel_values.view(B, F, C, final_h, final_w)
+                
+        return pixel_values
 
     def forward(
         self, 
-        images: List[Image.Image], 
-        media_type: str = "video"
+        pixel_values: torch.Tensor,
+        media_type: str = "video",
+        preprocessing_mode: str = "pad"
     ) -> torch.Tensor:
-        # Lazy initialization on first forward pass
         if self.model is None:
             self._initialize_vggt()
         
-        images_tensor = self._preprocess_images(images).unsqueeze(0).to(self.device)
-        images_shape = images_tensor.shape[-2:]
-        
-        aggregated_tokens_list, patch_start_idx = self.model.aggregator(images_tensor)
+        if media_type == "auto":
+            if pixel_values.ndim == 4:
+                media_type = "images"
+            else: 
+                media_type = "video"
+
+        pixel_values = pixel_values.float()
+        pixel_values = self._preprocess_tensor(pixel_values, preprocessing_mode)
+
+        pixel_values = pixel_values.to(self.device)
+
+        img_shape = pixel_values.shape[-2:]
+
+        B, T = pixel_values.shape[:2]
+        pixel_values_flat = pixel_values.view(B, T, -1, img_shape[0], img_shape[1])
+
+        aggregated_tokens_list, patch_start_idx = self.model.aggregator(pixel_values_flat)
 
         output = self.merger(
             aggregated_tokens_list=aggregated_tokens_list,
             patch_start_idx=patch_start_idx,
-            images_shape=images_shape,
+            images_shape=img_shape,
             media_type=media_type,
         )
         
@@ -170,175 +256,6 @@ class VGGTEncoder(nn.Module):
         """Override to method to update self.device"""
         self.device = device if isinstance(device, str) else str(device)
         return super().to(device)
-
-
-class Memory(nn.Module):
-    """
-    Memory module that maintains a learnable state and allows bidirectional
-    interaction between visual tokens and memory state
-    """
-    def __init__(self, dim=1024, num_heads=8, mlp_ratio=4.0, num_memory_tokens=1024):
-        super().__init__()
-        
-        self.num_memory_tokens = num_memory_tokens
-        self.dim = dim
-
-        # Learnable memory state - this persists across forward passes
-        self.state = nn.Parameter(torch.randn(1, num_memory_tokens, dim) * 0.02)
-
-        # Cross-attention: state attends to tokens (state is updated by visual info)
-        self.state_tokens_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
-        
-        # Cross-attention: tokens attend to state (visual tokens get context from memory)
-        self.tokens_state_attn = nn.MultiheadAttention(dim, num_heads, batch_first=True)
-
-        mlp_dim = int(dim * mlp_ratio)
-        self.state_ffn = nn.Sequential(
-            nn.Linear(dim, mlp_dim),
-            nn.GELU(),
-            nn.Linear(mlp_dim, dim),
-        )
-
-        self.tokens_ffn = nn.Sequential(
-            nn.Linear(dim, mlp_dim),
-            nn.GELU(),
-            nn.Linear(mlp_dim, dim),
-        )
-
-        self.norm_state_1 = nn.LayerNorm(dim)
-        self.norm_state_2 = nn.LayerNorm(dim)
-        self.norm_tokens_1 = nn.LayerNorm(dim)
-        self.norm_tokens_2 = nn.LayerNorm(dim)
-        
-        # For gating the memory contribution
-        self.gate = nn.Sequential(
-            nn.Linear(dim * 2, dim),
-            nn.Sigmoid()
-        )
-
-    def reset_state(self):
-        """Reset memory to initial state - call this at episode boundaries"""
-        self.state.data = torch.randn_like(self.state) * 0.02
-
-    def forward(self, visual_tokens: torch.Tensor, update_memory: bool = True):
-        """
-        Args:
-            visual_tokens: Can be either:
-                - (batch_size, seq_len, dim) - flattened tokens (backward compatible)
-                - (batch_size, num_frames, tokens_per_frame, dim) - frame-separated tokens
-            update_memory: whether to update the persistent memory state
-        
-        Returns:
-            enhanced_tokens: (batch_size, seq_len, dim) - tokens enhanced with memory
-        """
-        batch_size = visual_tokens.shape[0]
-        
-        # Check if input has frame dimension (4D) or is flattened (3D)
-        if visual_tokens.ndim == 4:
-            # Input has frame dimension: (batch, num_frames, tokens_per_frame, dim)
-            num_frames = visual_tokens.shape[1]
-            tokens_per_frame = visual_tokens.shape[2]
-            dim = visual_tokens.shape[3]
-            
-            # Process each frame sequentially
-            enhanced_frames = []
-            current_state = self.state.expand(batch_size, -1, -1)  # (batch, num_memory_tokens, dim)
-            
-            for frame_idx in range(num_frames):
-                frame_tokens = visual_tokens[:, frame_idx, :, :]  # (batch, tokens_per_frame, dim)
-                
-                # Step 1: Update memory state with current frame
-                if update_memory:
-                    state_normed = self.norm_state_1(current_state)
-                    tokens_normed = self.norm_tokens_1(frame_tokens)
-                    
-                    # State queries, tokens are keys and values
-                    state_attn_output, _ = self.state_tokens_attn(
-                        query=state_normed,
-                        key=tokens_normed,
-                        value=tokens_normed
-                    )  # (batch, num_memory_tokens, dim)
-                    
-                    # Update state with residual connection
-                    updated_state = current_state + state_attn_output
-                    updated_state = updated_state + self.state_ffn(self.norm_state_2(updated_state))
-                    
-                    # Update the persistent state (average across batch)
-                    self.state.data = updated_state.mean(dim=0, keepdim=True)
-                    current_state = updated_state
-                
-                # Step 2: Enhance frame tokens with memory context
-                state_normed = self.norm_state_2(current_state)
-                tokens_normed = self.norm_tokens_2(frame_tokens)
-                
-                # Tokens query, state is keys and values
-                tokens_attn_output, _ = self.tokens_state_attn(
-                    query=tokens_normed,
-                    key=state_normed,
-                    value=state_normed
-                )  # (batch, tokens_per_frame, dim)
-                
-                # Gated fusion: decide how much memory to incorporate
-                gate_input = torch.cat([frame_tokens, tokens_attn_output], dim=-1)
-                gate_values = self.gate(gate_input)
-                
-                # Apply gating
-                enhanced_frame = frame_tokens + gate_values * tokens_attn_output
-                enhanced_frame = enhanced_frame + self.tokens_ffn(self.norm_tokens_2(enhanced_frame))
-                
-                enhanced_frames.append(enhanced_frame)
-            
-            # Concatenate all frames: (batch, num_frames * tokens_per_frame, dim)
-            enhanced_tokens = torch.cat(enhanced_frames, dim=1)
-            
-        else:
-            # Backward compatible: flattened input (batch, seq_len, dim)
-            # Expand state for batch
-            current_state = self.state.expand(batch_size, -1, -1)  # (batch, num_memory_tokens, dim)
-            
-            # Step 1: Update memory state with new visual information
-            # Memory attends to visual tokens
-            if update_memory:
-                state_normed = self.norm_state_1(current_state)
-                tokens_normed = self.norm_tokens_1(visual_tokens)
-                
-                # State queries, tokens are keys and values
-                state_attn_output, _ = self.state_tokens_attn(
-                    query=state_normed,
-                    key=tokens_normed,
-                    value=tokens_normed
-                )  # (batch, num_memory_tokens, dim)
-                
-                # Update state with residual connection
-                updated_state = current_state + state_attn_output
-                updated_state = updated_state + self.state_ffn(self.norm_state_2(updated_state))
-                
-                # Update the persistent state (average across batch)
-                self.state.data = updated_state.mean(dim=0, keepdim=True)
-                current_state = updated_state
-            
-            # Step 2: Enhance visual tokens with memory context
-            # Visual tokens attend to memory
-            state_normed = self.norm_state_2(current_state)
-            tokens_normed = self.norm_tokens_2(visual_tokens)
-            
-            # Tokens query, state is keys and values
-            tokens_attn_output, _ = self.tokens_state_attn(
-                query=tokens_normed,
-                key=state_normed,
-                value=state_normed
-            )  # (batch, seq_len, dim)
-            
-            # Gated fusion: decide how much memory to incorporate
-            gate_input = torch.cat([visual_tokens, tokens_attn_output], dim=-1)
-            gate_values = self.gate(gate_input)
-            
-            # Apply gating
-            enhanced_tokens = visual_tokens + gate_values * tokens_attn_output
-            enhanced_tokens = enhanced_tokens + self.tokens_ffn(self.norm_tokens_2(enhanced_tokens))
-        
-        return enhanced_tokens
-
 
 # Missing constants
 _CONFIG_FOR_DOC = "Qwen2_5_VLConfig"
@@ -355,35 +272,33 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLPreTrainedModel, Ge
     def __init__(self, config):
         super().__init__(config)
 
-        # VGGT integration
         vggt_config = VGGTMergerConfig(output_dim=config.hidden_size)
         self.vggt = VGGTEncoder(vggt_config, freeze=True)
         
-        # Fusion weight for VGGT features
         self.vggt_fusion_weight = getattr(config, "vggt_fusion_weight", 0.3)
 
-        # Memory module
-        self.use_memory = getattr(config, "use_memory", True)
-        if self.use_memory:
-            self.memory = Memory(
-                dim=config.hidden_size,
-                num_heads=getattr(config, "memory_num_heads", 8),
-                mlp_ratio=getattr(config, "memory_mlp_ratio", 4.0),
-                num_memory_tokens=getattr(config, "num_memory_tokens", 256)
-            )
+        self.memory = CUT3RStyleMemory(
+            visual_dim=config.hidden_size,
+        )
+
+        self.state_feat = None
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-        base = Qwen2_5_VLForConditionalGeneration.from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
-        
+        base = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            pretrained_model_name_or_path, *model_args, **kwargs
+        )
         self = cls(base.config)
-
-        self.visual = base.visual 
+        
+        self.visual = base.visual
         self.model = base.model
         self.lm_head = base.lm_head
 
+        if self.memory is not None:
+            self.memory = self.memory.to(base.device)
+
         self.vggt._initialize_vggt()
-        self.vggt.to(base.device)
+        self.vggt = self.vggt.to(base.device)
 
         self.rope_deltas = None
         
@@ -400,11 +315,6 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLPreTrainedModel, Ge
 
     def set_output_embeddings(self, new_embeddings):
         self.lm_head = new_embeddings
-
-    def reset_memory(self):
-        """Reset memory state - call at episode/conversation boundaries"""
-        if self.use_memory:
-            self.memory.reset_state()
 
     def get_rope_index(
         self,
@@ -552,8 +462,7 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLPreTrainedModel, Ge
         cache_position: Optional[torch.LongTensor] = None,
         second_per_grid_ts: Optional[torch.Tensor] = None,
         images_vggt: Optional[List[Image.Image]] = None,  # PIL Images for VGGT
-        update_memory: bool = True,  # Whether to update memory
-        reset_memory: bool = False,  # Whether to reset memory
+        reset_memory: bool = True,  # Whether to reset memory
         **kwargs,
     ) -> Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:
         
@@ -563,10 +472,9 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLPreTrainedModel, Ge
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
-        # Reset memory if requested
-        if reset_memory and self.use_memory:
-            self.reset_memory()
-        
+        if reset_memory and self.memory is not None:
+            self.state_feat = None
+
         # Build input embeddings
         if inputs_embeds is None:
             inputs_embeds = self.model.get_input_embeddings()(input_ids)
@@ -574,80 +482,47 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLPreTrainedModel, Ge
             if pixel_values is not None:
                 pixel_values = pixel_values.type(self.visual.dtype)
                 
-                # Get base vision features
                 image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
                 
-                # VGGT enhancement
-                if images_vggt is not None:
-                    try:
-                        # Process through VGGT
-                        vggt_features = self.vggt.forward(images_vggt, media_type="images")
-                        vggt_features = vggt_features.view(-1, vggt_features.shape[-1])
-                        
-                        # Ensure dimensions match
-                        if vggt_features.shape[0] == image_embeds.shape[0]:
-                            # Fuse VGGT features
-                            image_embeds = image_embeds + self.vggt_fusion_weight * vggt_features
-                    except Exception as e:
-                        print(f"Warning: VGGT processing failed: {e}")
+                try:
+                    vggt_features = self.vggt(pixel_values, media_type="images")
+                    vggt_features = vggt_features.view(-1, vggt_features.shape[-1]) #[F, D]
+                    
+                    if vggt_features.shape[0] == image_embeds.shape[0]:
+                        image_embeds = image_embeds + self.vggt_fusion_weight * vggt_features
+                except Exception as e:
+                    print(f"Warning: VGGT processing failed: {e}")
                 
-                # Apply memory module to visual features
-                if self.use_memory:
+                if self.memory is not None and video_grid_thw is not None and len(video_grid_thw) > 0:
+                    device = image_embeds.device
                     batch_size = input_ids.shape[0]
                     dim = image_embeds.shape[-1]
-                    
-                    # Use image_grid_thw to reshape tokens with frame separation
-                    if image_grid_thw is not None and len(image_grid_thw) > 0:
-                        # Calculate tokens per image using grid_thw
-                        # image_grid_thw shape: (num_images, 3) with (t, h, w)
-                        # For images, t is typically 1, but we preserve frame structure
-                        spatial_merge_size = self.config.vision_config.spatial_merge_size
-                        
-                        # Group tokens by image
-                        image_embeds_list = []
-                        start_idx = 0
-                        
-                        for img_idx in range(len(image_grid_thw)):
-                            t, h, w = image_grid_thw[img_idx]
-                            # Calculate tokens after spatial merging
-                            tokens_per_frame = (h // spatial_merge_size) * (w // spatial_merge_size)
-                            num_frames = t.item() if isinstance(t, torch.Tensor) else t
-                            total_tokens = num_frames * tokens_per_frame
-                            
-                            # Extract tokens for this image
-                            img_tokens = image_embeds[start_idx:start_idx + total_tokens]
-                            
-                            # Reshape to (1, num_frames, tokens_per_frame, dim)
-                            img_tokens_reshaped = img_tokens.view(1, num_frames, tokens_per_frame, dim)
-                            image_embeds_list.append(img_tokens_reshaped)
-                            
-                            start_idx += total_tokens
-                        
-                        # Concatenate all images: (batch, num_frames_total, tokens_per_frame, dim)
-                        # Note: This assumes all images have same tokens_per_frame
-                        if image_embeds_list:
-                            # For simplicity, process each image separately and concatenate
-                            enhanced_list = []
-                            for img_tokens_reshaped in image_embeds_list:
-                                enhanced_img = self.memory(img_tokens_reshaped, update_memory=update_memory)
-                                enhanced_list.append(enhanced_img)
-                            
-                            # Concatenate and flatten: (batch, seq_len, dim) -> (total_tokens, dim)
-                            image_embeds = torch.cat(enhanced_list, dim=1).view(-1, dim)
-                    else:
-                        # Fallback: backward compatible behavior
-                        n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
-                        tokens_per_image = n_image_tokens // batch_size if batch_size > 0 else 0
-                        
-                        if tokens_per_image > 0:
-                            # Reshape to (batch, seq, dim)
-                            image_embeds_reshaped = image_embeds.view(batch_size, tokens_per_image, -1)
-                            # Apply memory
-                            image_embeds_enhanced = self.memory(image_embeds_reshaped, update_memory=update_memory)
-                            # Flatten back
-                            image_embeds = image_embeds_enhanced.view(-1, image_embeds.shape[-1])
+
+                    image_embeds_list = []
+                    start_idx = 0
+                    spatial_merge_size = self.config.vision_config.spatial_merge_size
+
+                    for img_idx in range(len(image_grid_thw)):
+                        t, h, w = image_grid_thw[img_idx]
+                        tokens_per_frame = (h // spatial_merge_size) * (w // spatial_merge_size)
+                        num_frames = t.item() if isinstance(t, torch.Tensor) else t
+                        total_tokens = num_frames * tokens_per_frame
+
+                        img_tokens = image_embeds[start_idx:start_idx + total_tokens]
+                        img_tokens_reshaped = img_tokens.view(1, num_frames, tokens_per_frame, dim)
+
+                        image_embeds_list.append(img_tokens_reshaped)
+                        start_idx += total_tokens
+
+                    enhanced_list = []
+
+                    for img_tokens_reshaped in image_embeds_list:
+                        enhanced_state, enhanced_visual = self.memory(img_tokens_reshaped, self.state_feat)
+                        self.state_feat = enhanced_state
+                        enhanced_list.append(enhanced_visual)
+
+                    image_embeds = torch.cat(enhanced_list, dim=1).view(-1, dim)
                 
-                # Insert image embeddings into input
                 n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
                 n_image_features = image_embeds.shape[0]
                 
@@ -661,43 +536,46 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLPreTrainedModel, Ge
                 image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
                 inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
             
-            # Handle videos (similar to images)
             if pixel_values_videos is not None:
                 pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
                 video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
+
+                try: 
+                    vggt_features = self.vggt(pixel_values_videos, media_type="video")
+                    vggt_features = vggt_features.view(-1, vggt_features.shape[-1]) #[F, D]
+                    
+                    if vggt_features.shape[0] == video_embeds.shape[0]:
+                        video_embeds = video_embeds + self.vggt_fusion_weight * vggt_features
+                except Exception as e:
+                    print(f"Warning: VGGT processing failed: {e}")
                 
-                # Apply memory module to video features with frame separation
-                if self.use_memory and video_grid_thw is not None and len(video_grid_thw) > 0:
+                if self.memory is not None and video_grid_thw is not None and len(video_grid_thw) > 0:
                     dim = video_embeds.shape[-1]
                     spatial_merge_size = self.config.vision_config.spatial_merge_size
                     
-                    # Group tokens by video
                     video_embeds_list = []
                     start_idx = 0
                     
                     for vid_idx in range(len(video_grid_thw)):
                         t, h, w = video_grid_thw[vid_idx]
-                        # Calculate tokens after spatial merging
                         tokens_per_frame = (h // spatial_merge_size) * (w // spatial_merge_size)
                         num_frames = t.item() if isinstance(t, torch.Tensor) else t
                         total_tokens = num_frames * tokens_per_frame
                         
-                        # Extract tokens for this video
                         vid_tokens = video_embeds[start_idx:start_idx + total_tokens]
                         
-                        # Reshape to (1, num_frames, tokens_per_frame, dim)
                         vid_tokens_reshaped = vid_tokens.view(1, num_frames, tokens_per_frame, dim)
                         video_embeds_list.append(vid_tokens_reshaped)
                         
                         start_idx += total_tokens
                     
-                    # Process each video separately with frame-by-frame memory updates
                     enhanced_list = []
+
                     for vid_tokens_reshaped in video_embeds_list:
-                        enhanced_vid = self.memory(vid_tokens_reshaped, update_memory=update_memory)
-                        enhanced_list.append(enhanced_vid)
+                        enhanced_state, enhanced_visual = self.memory(vid_tokens_reshaped, self.state_feat)
+                        self.state_feat = enhanced_state
+                        enhanced_list.append(enhanced_visual)
                     
-                    # Concatenate and flatten: (batch, seq_len, dim) -> (total_tokens, dim)
                     video_embeds = torch.cat(enhanced_list, dim=1).view(-1, dim)
                 
                 mask = input_ids == self.config.video_token_id
@@ -708,7 +586,6 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLPreTrainedModel, Ge
             if attention_mask is not None:
                 attention_mask = attention_mask.to(inputs_embeds.device)
         
-        # Calculate position IDs
         if position_ids is None and (attention_mask is None or attention_mask.ndim == 2):
             if (
                 (cache_position is not None and cache_position[0] == 0)
@@ -816,7 +693,6 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLPreTrainedModel, Ge
         self,
         input_ids: Optional[torch.LongTensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Get number of images and videos per sample"""
         image_token_id = self.config.image_token_id
         video_token_id = self.config.video_token_id
         vision_start_token_id = self.config.vision_start_token_id

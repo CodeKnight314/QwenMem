@@ -8,7 +8,9 @@ from tqdm import tqdm
 from PIL import Image
 from collections import defaultdict
 from datasets import load_dataset
+from torchvision.transforms import ToTensor
 import gc
+import argparse
 
 def sample_frames(video_path: str, n_frames: int = 8):
     cap = cv2.VideoCapture(video_path)
@@ -73,6 +75,8 @@ def run_vsi_eval(
 
     print(f"🚀 Loading model: {model_name}")
     from transformers import AutoProcessor, AutoModelForImageTextToText
+    from src.QwenMem.modeling_qwen2_5_vl_with_vggt import Qwen2_5_VLForConditionalGenerationWithVGGT
+    from src.QwenMem.modeling_qwen2_5_vl_with_memory import Qwen2_5_VLForConditionalGenerationWithMemory
 
     processor = AutoProcessor.from_pretrained(
         model_name, trust_remote_code=True, use_fast=True
@@ -83,12 +87,12 @@ def run_vsi_eval(
     if processor.tokenizer.pad_token is None:
         processor.tokenizer.pad_token = processor.tokenizer.eos_token
     
-    model = AutoModelForImageTextToText.from_pretrained(
-        model_name,
-        dtype=torch.float16,
-        device_map="auto",
-        trust_remote_code=True,
-    )
+    if model_name == "RichardGTang/Qwen2_5_VL-3B-WithVGGT":
+        model = Qwen2_5_VLForConditionalGenerationWithVGGT.from_pretrained(model_name, device_map="auto", trust_remote_code=True)
+    elif model_name == "RichardGTang/Qwen2_5_VL-3B-WithMemory":
+        model = Qwen2_5_VLForConditionalGenerationWithMemory.from_pretrained(model_name, device_map="auto", trust_remote_code=True)
+    else:
+        model = AutoModelForImageTextToText.from_pretrained(model_name, device_map="auto", trust_remote_code=True)
 
     model.eval()
 
@@ -116,6 +120,9 @@ def run_vsi_eval(
                 continue
 
             frames = sample_frames(video_path, n_frames)
+            image_tensor = torch.stack([ToTensor()(frame) for frame in frames])
+            image_tensor = image_tensor.unsqueeze(0).repeat(len(batch_prompts),1,1,1,1)
+            image_tensor = image_tensor.to(DEVICE, dtype=torch.float16)
             if not frames:
                 continue
 
@@ -182,6 +189,7 @@ def run_vsi_eval(
                 
                 outputs = model.generate(
                     **inputs, 
+                    images_tensor=image_tensor,
                     do_sample=False, 
                     max_new_tokens=32,
                     pad_token_id=processor.tokenizer.pad_token_id
@@ -258,13 +266,10 @@ def run_vsi_eval(
     torch.cuda.empty_cache()
 
 if __name__ == "__main__":
-    models = [
-        "Qwen/Qwen2.5-VL-3B-Instruct",
-        "Qwen/Qwen2.5-VL-7B-Instruct",
-        "Qwen/Qwen3-VL-2B-Instruct",
-        "Qwen/Qwen3-VL-4B-Instruct",
-        "Qwen/Qwen3-VL-8B-Instruct",
-    ]
-
-    for m in models:
-        run_vsi_eval(m, out_dir="vsi_outputs/", n_frames=32, batch_size=4)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--m", default="RichardGTang/Qwen2_5_VL-3B-WithVGGT", type=str, required=True)
+    parser.add_argument("--o", default="vsi_outputs/", type=str, required=True)
+    parser.add_argument("--n", default=32, type=int)
+    parser.add_argument("--b", default=4, type=int)
+    args = parser.parse_args()
+    run_vsi_eval(args.model, args.out_dir, args.n_frames, args.batch_size)

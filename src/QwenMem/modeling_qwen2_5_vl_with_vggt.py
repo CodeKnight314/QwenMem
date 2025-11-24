@@ -11,14 +11,13 @@ from modeling_qwen2_5_vl import (
     Qwen2RMSNorm,
 )
 from configuration_qwen2_5_vl import Qwen2_5_VLConfig
-from vggt.models.vggt import VGGT
+from vggt import VGGT
 from transformers.generation import GenerationMixin
 from transformers.utils import (
     add_start_docstrings_to_model_forward,
 )
 from torch.nn import CrossEntropyLoss
 from PIL import Image
-from vggt.utils.load_fn import load_and_preprocess_images
 
 @dataclass
 class VGGTMergerConfig:
@@ -41,18 +40,10 @@ class VGGTMerger(nn.Module):
             self.input_dim * self.temporal_merge_size * (self.spatial_merge_size ** 2)
         )
         self.token_merge_ln_q = Qwen2RMSNorm(self.token_merge_in_dim)
-        self.token_merge_mlp = nn.Sequential(
-            nn.Linear(self.token_merge_in_dim, self.token_merge_in_dim),
-            nn.GELU(),
-            nn.Linear(self.token_merge_in_dim, self.output_dim),
-        )
+        self.token_merge_mlp = nn.Linear(self.token_merge_in_dim, self.output_dim)
 
         self.vgg_to_language_ln_q = Qwen2RMSNorm(self.output_dim)
-        self.vgg_to_language_mlp = nn.Sequential(
-            nn.Linear(self.output_dim, self.output_dim),
-            nn.GELU(),
-            nn.Linear(self.output_dim, self.output_dim),
-        )
+        self.vgg_to_language_mlp = nn.Linear(self.output_dim, self.output_dim)
 
     def merge_tokens(self, tokens: torch.Tensor, images_shape: Tuple) -> torch.Tensor:
         H, W = images_shape[-2:]
@@ -142,9 +133,6 @@ class VGGTEncoder(nn.Module):
             if self.freeze:
                 for param in self.model.parameters():
                     param.requires_grad = False
-    
-    def _preprocess_images(self, images: List[Image.Image]) -> torch.Tensor:
-        return load_and_preprocess_images(images)
     
     def _adjust_to_patch_size(self, size: int):
         return (size // 14) * 14
@@ -237,6 +225,7 @@ class VGGTEncoder(nn.Module):
             else: 
                 media_type = "video"
 
+        pixel_values = pixel_values.float()
         pixel_values = self._preprocess_tensor(pixel_values, preprocessing_mode)
 
         pixel_values = pixel_values.to(self.device)
@@ -440,6 +429,8 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        images_tensor: Optional[torch.Tensor] = None,
+        videos_tensor: Optional[torch.Tensor] = None, 
         pixel_values: Optional[torch.Tensor] = None,
         pixel_values_videos: Optional[torch.FloatTensor] = None,
         image_grid_thw: Optional[torch.LongTensor] = None,
@@ -464,14 +455,19 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
                 
                 image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
                 
-                try:
-                    vggt_features = self.vggt(pixel_values, media_type="images")
-                    vggt_features = vggt_features.view(-1, vggt_features.shape[-1]) #[F, D]
-                    
-                    if vggt_features.shape[0] == image_embeds.shape[0]:
-                        image_embeds = image_embeds + self.vggt_fusion_weight * vggt_features
-                except Exception as e:
-                    print(f"Warning: VGGT processing failed: {e}")
+                if images_tensor is not None:
+                    try:
+                        images_tensor = images_tensor.to(dtype=self.visual.dtype,
+                                         device=image_embeds.device,
+                                         non_blocking=True)
+                        images_tensor.requires_grad_(True)          
+                        vggt_features = self.vggt(images_tensor, media_type="images")
+                        vggt_features = vggt_features.view(-1, vggt_features.shape[-1]) #[F, D]
+                        
+                        if vggt_features.shape[0] == image_embeds.shape[0]:
+                            image_embeds = image_embeds + self.vggt_fusion_weight * vggt_features
+                    except Exception as e:
+                        print(f"Warning: VGGT processing failed: {e}")
 
                 mask = input_ids == self.config.image_token_id
                 image_mask = mask.unsqueeze(-1).expand_as(inputs_embeds)
@@ -482,14 +478,21 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
                 pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
                 video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
 
-                try: 
-                    vggt_features = self.vggt(pixel_values_videos, media_type="video")
-                    vggt_features = vggt_features.view(-1, vggt_features.shape[-1]) #[F, D]
-                    
-                    if vggt_features.shape[0] == video_embeds.shape[0]:
-                        video_embeds = video_embeds + self.vggt_fusion_weight * vggt_features
-                except Exception as e:
-                    print(f"Warning: VGGT processing failed: {e}")
+                if videos_tensor is not None:
+                    try: 
+                        videos_tensor = videos_tensor.to(dtype=self.visual.dtype,
+                                         device=video_embeds.device,
+                                         non_blocking=True)
+                        videos_tensor.requires_grad_(True)
+                        vggt_features = self.vggt(videos_tensor, media_type="video")
+                        vggt_features = vggt_features.view(-1, vggt_features.shape[-1]) #[F, D]
+                        
+                        if vggt_features.shape[0] == video_embeds.shape[0]:
+                            video_embeds = video_embeds + self.vggt_fusion_weight * vggt_features
+                    except Exception as e:
+                        print(f"Warning: VGGT processing failed: {e}")
+                        import traceback
+                        traceback.print_exc()
                 
                 mask = input_ids == self.config.video_token_id
                 video_mask = mask.unsqueeze(-1).expand_as(inputs_embeds)
