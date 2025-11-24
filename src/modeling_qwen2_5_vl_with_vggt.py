@@ -19,6 +19,7 @@ from transformers.utils import (
 from torch.nn import CrossEntropyLoss
 from PIL import Image
 
+
 @dataclass
 class VGGTMergerConfig:
     input_dim: int = 2048
@@ -26,6 +27,7 @@ class VGGTMergerConfig:
     patch_size: int = 14
     temporal_merge_size: int = 2
     spatial_merge_size: int = 2
+
 
 class VGGTMerger(nn.Module):
     def __init__(self, config: VGGTMergerConfig):
@@ -37,9 +39,14 @@ class VGGTMerger(nn.Module):
         self.output_dim = config.output_dim
 
         self.token_merge_in_dim = (
-            self.input_dim * self.temporal_merge_size * (self.spatial_merge_size ** 2)
+            self.input_dim * self.temporal_merge_size * (self.spatial_merge_size**2)
         )
         self.token_merge_ln_q = Qwen2RMSNorm(self.token_merge_in_dim)
+        # self.token_merge_mlp = nn.Sequential(
+        #     nn.Linear(self.token_merge_in_dim, self.token_merge_in_dim),
+        #     nn.GELU(),
+        #     nn.Linear(self.token_merge_in_dim, self.output_dim),
+        # )
         self.token_merge_mlp = nn.Linear(self.token_merge_in_dim, self.output_dim)
 
         self.vgg_to_language_ln_q = Qwen2RMSNorm(self.output_dim)
@@ -60,7 +67,7 @@ class VGGTMerger(nn.Module):
         usable_h = NUM_PATCH_H - (NUM_PATCH_H % self.spatial_merge_size)
         usable_w = NUM_PATCH_W - (NUM_PATCH_W % self.spatial_merge_size)
         tokens = tokens[:, :, :usable_h, :usable_w, :]
-        
+
         tokens = tokens.view(
             B,
             F // self.temporal_merge_size,
@@ -78,7 +85,10 @@ class VGGTMerger(nn.Module):
             F // self.temporal_merge_size,
             usable_h // self.spatial_merge_size,
             usable_w // self.spatial_merge_size,
-            self.temporal_merge_size * self.spatial_merge_size * self.spatial_merge_size * D,
+            self.temporal_merge_size
+            * self.spatial_merge_size
+            * self.spatial_merge_size
+            * D,
         )
 
         tokens = self.token_merge_ln_q(tokens)
@@ -93,15 +103,15 @@ class VGGTMerger(nn.Module):
         media_type: str = "video",
     ) -> torch.Tensor:
         tokens = aggregated_tokens_list[-1][:, :, patch_start_idx:]
-        
+
         if media_type == "images":
             tokens = tokens.repeat_interleave(2, dim=1)
-        
+
         tokens = self.merge_tokens(tokens, images_shape)
-        
+
         x = self.vgg_to_language_ln_q(tokens)
         x = self.vgg_to_language_mlp(x)
-        
+
         return x
 
 
@@ -113,34 +123,35 @@ class VGGTEncoder(nn.Module):
         target_size: int = 518,
     ):
         super().__init__()
-        
+
         self.config = config
         self.freeze = freeze
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        
-        # Don't initialize VGGT yet - will be done later
+
         self.model = None
         self.merger = VGGTMerger(config)
         self.target_size = target_size
-        
+
     def _initialize_vggt(self):
         """Initialize VGGT model - called after parent model is loaded"""
         if self.model is None:
             self.model = VGGT.from_pretrained("facebook/VGGT-1B")
             self.model.camera_head = None
             self.model.track_head = None
-            
+
             if self.freeze:
                 for param in self.model.parameters():
                     param.requires_grad = False
-    
+
     def _adjust_to_patch_size(self, size: int):
         return (size // 14) * 14
- 
-    def _preprocess_tensor(self, pixel_values: torch.Tensor, mode: str = "pad") -> torch.Tensor:
-        assert pixel_values.ndim == 4 or pixel_values.ndim == 5, f"Invalid shape of tensor: {pixel_values.shape}"
-        
-        is_video = pixel_values.ndim == 5
+
+    def _preprocess_tensor(
+        self, pixel_values: torch.Tensor, mode: str = "pad"
+    ) -> torch.Tensor:
+        assert (
+            pixel_values.ndim == 4 or pixel_values.ndim == 5
+        ), f"Invalid shape of tensor: {pixel_values.shape}"
 
         if pixel_values.ndim == 4:
             pixel_values = pixel_values.unsqueeze(1)
@@ -160,72 +171,65 @@ class VGGTEncoder(nn.Module):
             new_w = self._adjust_to_patch_size(int(W * scale))
 
             pixel_values = torch.nn.functional.interpolate(
-                pixel_values, 
-                size=(new_h, new_w), 
-                mode="bilinear", 
-                align_corners=True
+                pixel_values, size=(new_h, new_w), mode="bilinear", align_corners=True
             )
 
             pad_h = (target_size - new_h) // 2
             pad_w = (target_size - new_w) // 2
             pixel_values = torch.nn.functional.pad(
                 pixel_values,
-                (pad_w, target_size - new_w - pad_w, pad_h, target_size - new_h - pad_h),
-                value=1.0
+                (
+                    pad_w,
+                    target_size - new_w - pad_w,
+                    pad_h,
+                    target_size - new_h - pad_h,
+                ),
+                value=1.0,
             )
         else:
             scale = target_size / W
             new_h = int(H * scale)
             new_w = target_size
-            
+
             pixel_values = torch.nn.functional.interpolate(
-                pixel_values,
-                size=(new_h, new_w),
-                mode='bilinear',
-                align_corners=False
+                pixel_values, size=(new_h, new_w), mode="bilinear", align_corners=False
             )
-            
+
             if new_h > target_size:
                 start_h = (new_h - target_size) // 2
-                pixel_values = pixel_values[:, :, start_h:start_h + target_size, :]
+                pixel_values = pixel_values[:, :, start_h : start_h + target_size, :]
             else:
                 pad_h = (target_size - new_h) // 2
                 pixel_values = torch.nn.functional.pad(
-                    pixel_values,
-                    (0, 0, pad_h, target_size - new_h - pad_h),
-                    value=1.0
+                    pixel_values, (0, 0, pad_h, target_size - new_h - pad_h), value=1.0
                 )
-        
+
         final_h = self._adjust_to_patch_size(pixel_values.shape[2])
         final_w = self._adjust_to_patch_size(pixel_values.shape[3])
         if pixel_values.shape[2] != final_h or pixel_values.shape[3] != final_w:
             pixel_values = torch.nn.functional.interpolate(
                 pixel_values,
                 size=(final_h, final_w),
-                mode='bilinear',
-                align_corners=False
+                mode="bilinear",
+                align_corners=False,
             )
-        
+
         pixel_values = pixel_values.view(B, F, C, final_h, final_w)
-                
+
         return pixel_values
 
     def forward(
-        self, 
+        self,
         pixel_values: torch.Tensor,
         media_type: str = "video",
-        preprocessing_mode: str = "pad"
+        preprocessing_mode: str = "pad",
     ) -> torch.Tensor:
-        if self.model is None:
-            self._initialize_vggt()
-        
         if media_type == "auto":
             if pixel_values.ndim == 4:
                 media_type = "images"
-            else: 
+            else:
                 media_type = "video"
 
-        pixel_values = pixel_values.float()
         pixel_values = self._preprocess_tensor(pixel_values, preprocessing_mode)
 
         pixel_values = pixel_values.to(self.device)
@@ -235,7 +239,9 @@ class VGGTEncoder(nn.Module):
         B, T = pixel_values.shape[:2]
         pixel_values_flat = pixel_values.view(B, T, -1, img_shape[0], img_shape[1])
 
-        aggregated_tokens_list, patch_start_idx = self.model.aggregator(pixel_values_flat)
+        aggregated_tokens_list, patch_start_idx = self.model.aggregator(
+            pixel_values_flat
+        )
 
         output = self.merger(
             aggregated_tokens_list=aggregated_tokens_list,
@@ -243,13 +249,14 @@ class VGGTEncoder(nn.Module):
             images_shape=img_shape,
             media_type=media_type,
         )
-        
+
         return output
-    
+
     def to(self, device):
         """Override to method to update self.device"""
         self.device = device if isinstance(device, str) else str(device)
         return super().to(device)
+
 
 class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGeneration):
     def __init__(self, config):
@@ -261,21 +268,18 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
         self.vggt_fusion_weight = getattr(config, "vggt_fusion_weight", 0.3)
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-        base = Qwen2_5_VLForConditionalGeneration.from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
-        self = cls(base.config)
-        
-        self.visual = base.visual
-        self.model = base.model
-        
-        self.lm_head = base.lm_head
-        
-        self.vggt._initialize_vggt()
-        self.vggt.to(base.device)
+    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
+        model = super().from_pretrained(
+            pretrained_model_name_or_path,
+            ignore_mismatched_sizes=True,
+            trust_remote_code=True,
+            *args,
+            **kwargs,
+        )
 
-        self.rope_deltas = None
-        
-        return self
+        model.vggt._initialize_vggt()
+
+        return model
 
     def get_input_embeddings(self):
         return self.model.get_input_embeddings()
@@ -285,10 +289,10 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
 
     def get_output_embeddings(self):
         return self.lm_head
-    
+
     def set_output_embeddings(self, new_embeddings):
         self.lm_head = new_embeddings
-    
+
     def get_rope_index(self, *args, **kwargs):
         return self.model.get_rope_index(*args, **kwargs)
 
@@ -305,22 +309,29 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
         video_token_id = self.config.video_token_id
         vision_start_token_id = self.config.vision_start_token_id
         mrope_position_deltas = []
-        
-        if input_ids is not None and (image_grid_thw is not None or video_grid_thw is not None):
+
+        if input_ids is not None and (
+            image_grid_thw is not None or video_grid_thw is not None
+        ):
             total_input_ids = input_ids
             if attention_mask is None:
                 attention_mask = torch.ones_like(total_input_ids)
             position_ids = torch.ones(
-                3, input_ids.shape[0], input_ids.shape[1],
-                dtype=input_ids.dtype, device=input_ids.device,
+                3,
+                input_ids.shape[0],
+                input_ids.shape[1],
+                dtype=input_ids.dtype,
+                device=input_ids.device,
             )
             image_index, video_index = 0, 0
             attention_mask = attention_mask.to(total_input_ids.device)
-            
+
             for i, input_ids in enumerate(total_input_ids):
                 input_ids = input_ids[attention_mask[i] == 1]
                 image_nums, video_nums = 0, 0
-                vision_start_indices = torch.argwhere(input_ids == vision_start_token_id).squeeze(1)
+                vision_start_indices = torch.argwhere(
+                    input_ids == vision_start_token_id
+                ).squeeze(1)
                 vision_tokens = input_ids[vision_start_indices + 1]
                 image_nums = (vision_tokens == image_token_id).sum()
                 video_nums = (vision_tokens == video_token_id).sum()
@@ -328,7 +339,7 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
                 llm_pos_ids_list: list = []
                 st = 0
                 remain_images, remain_videos = image_nums, video_nums
-                
+
                 for _ in range(image_nums + video_nums):
                     if image_token_id in input_tokens and remain_images > 0:
                         ed_image = input_tokens.index(image_token_id, st)
@@ -338,7 +349,7 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
                         ed_video = input_tokens.index(video_token_id, st)
                     else:
                         ed_video = len(input_tokens) + 1
-                        
+
                     if ed_image < ed_video:
                         t, h, w = (
                             image_grid_thw[image_index][0],
@@ -362,7 +373,7 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
                         video_index += 1
                         remain_videos -= 1
                         ed = ed_video
-                        
+
                     llm_grid_t, llm_grid_h, llm_grid_w = (
                         t.item(),
                         h.item() // spatial_merge_size,
@@ -370,37 +381,77 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
                     )
                     text_len = ed - st
 
-                    st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-                    llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
+                    st_idx = (
+                        llm_pos_ids_list[-1].max() + 1
+                        if len(llm_pos_ids_list) > 0
+                        else 0
+                    )
+                    llm_pos_ids_list.append(
+                        torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+                    )
 
                     range_tensor = torch.arange(llm_grid_t).view(-1, 1)
                     expanded_range = range_tensor.expand(-1, llm_grid_h * llm_grid_w)
-                    time_tensor = expanded_range * second_per_grid_t * self.config.vision_config.tokens_per_second
+                    time_tensor = (
+                        expanded_range
+                        * second_per_grid_t
+                        * self.config.vision_config.tokens_per_second
+                    )
                     time_tensor_long = time_tensor.long()
                     t_index = time_tensor_long.flatten()
 
-                    h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
-                    w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()
-                    llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
+                    h_index = (
+                        torch.arange(llm_grid_h)
+                        .view(1, -1, 1)
+                        .expand(llm_grid_t, -1, llm_grid_w)
+                        .flatten()
+                    )
+                    w_index = (
+                        torch.arange(llm_grid_w)
+                        .view(1, 1, -1)
+                        .expand(llm_grid_t, llm_grid_h, -1)
+                        .flatten()
+                    )
+                    llm_pos_ids_list.append(
+                        torch.stack([t_index, h_index, w_index]) + text_len + st_idx
+                    )
                     st = ed + llm_grid_t * llm_grid_h * llm_grid_w
 
                 if st < len(input_tokens):
-                    st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+                    st_idx = (
+                        llm_pos_ids_list[-1].max() + 1
+                        if len(llm_pos_ids_list) > 0
+                        else 0
+                    )
                     text_len = len(input_tokens) - st
-                    llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
+                    llm_pos_ids_list.append(
+                        torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+                    )
 
                 llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
-                position_ids[..., i, attention_mask[i] == 1] = llm_positions.to(position_ids.device)
-                mrope_position_deltas.append(llm_positions.max() + 1 - len(total_input_ids[i]))
-            
-            mrope_position_deltas = torch.tensor(mrope_position_deltas, device=input_ids.device).unsqueeze(1)
+                position_ids[..., i, attention_mask[i] == 1] = llm_positions.to(
+                    position_ids.device
+                )
+                mrope_position_deltas.append(
+                    llm_positions.max() + 1 - len(total_input_ids[i])
+                )
+
+            mrope_position_deltas = torch.tensor(
+                mrope_position_deltas, device=input_ids.device
+            ).unsqueeze(1)
             return position_ids, mrope_position_deltas
         else:
             if attention_mask is not None:
                 position_ids = attention_mask.long().cumsum(-1) - 1
                 position_ids.masked_fill_(attention_mask == 0, 1)
-                position_ids = position_ids.unsqueeze(0).expand(3, -1, -1).to(attention_mask.device)
-                max_position_ids = position_ids.max(0, keepdim=False)[0].max(-1, keepdim=True)[0]
+                position_ids = (
+                    position_ids.unsqueeze(0)
+                    .expand(3, -1, -1)
+                    .to(attention_mask.device)
+                )
+                max_position_ids = position_ids.max(0, keepdim=False)[0].max(
+                    -1, keepdim=True
+                )[0]
                 mrope_position_deltas = max_position_ids + 1 - attention_mask.shape[-1]
             else:
                 position_ids = (
@@ -416,7 +467,6 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
 
             return position_ids, mrope_position_deltas
 
-    
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -430,7 +480,7 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         images_tensor: Optional[torch.Tensor] = None,
-        videos_tensor: Optional[torch.Tensor] = None, 
+        videos_tensor: Optional[torch.Tensor] = None,
         pixel_values: Optional[torch.Tensor] = None,
         pixel_values_videos: Optional[torch.FloatTensor] = None,
         image_grid_thw: Optional[torch.LongTensor] = None,
@@ -441,77 +491,109 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
         **kwargs,
     ) -> Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:
 
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
+        return_dict = (
+            return_dict if return_dict is not None else self.config.use_return_dict
+        )
 
         if inputs_embeds is None:
             inputs_embeds = self.model.get_input_embeddings()(input_ids)
-            
+
             if pixel_values is not None:
-                pixel_values = pixel_values.type(self.visual.dtype) # [F, 3, H, W]
-                
+                pixel_values = pixel_values.type(self.visual.dtype)  # [F, 3, H, W]
+
                 image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
-                
+
                 if images_tensor is not None:
                     try:
-                        images_tensor = images_tensor.to(dtype=self.visual.dtype,
-                                         device=image_embeds.device,
-                                         non_blocking=True)
-                        images_tensor.requires_grad_(True)          
+                        images_tensor = images_tensor.to(
+                            dtype=self.visual.dtype,
+                            device=image_embeds.device,
+                            non_blocking=True,
+                        )
+                        images_tensor.requires_grad_(True)
                         vggt_features = self.vggt(images_tensor, media_type="images")
-                        vggt_features = vggt_features.view(-1, vggt_features.shape[-1]) #[F, D]
-                        
+                        vggt_features = vggt_features.view(
+                            -1, vggt_features.shape[-1]
+                        )  # [F, D]
+
                         if vggt_features.shape[0] == image_embeds.shape[0]:
-                            image_embeds = image_embeds + self.vggt_fusion_weight * vggt_features
+                            image_embeds = (
+                                image_embeds + self.vggt_fusion_weight * vggt_features
+                            )
                     except Exception as e:
                         print(f"Warning: VGGT processing failed: {e}")
 
                 mask = input_ids == self.config.image_token_id
                 image_mask = mask.unsqueeze(-1).expand_as(inputs_embeds)
-                image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+                image_embeds = image_embeds.to(
+                    inputs_embeds.device, inputs_embeds.dtype
+                )
                 inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
-            
+
             if pixel_values_videos is not None:
                 pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
                 video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
 
                 if videos_tensor is not None:
-                    try: 
-                        videos_tensor = videos_tensor.to(dtype=self.visual.dtype,
-                                         device=video_embeds.device,
-                                         non_blocking=True)
+                    try:
+                        videos_tensor = videos_tensor.to(
+                            dtype=self.visual.dtype,
+                            device=video_embeds.device,
+                            non_blocking=True,
+                        )
                         videos_tensor.requires_grad_(True)
                         vggt_features = self.vggt(videos_tensor, media_type="video")
-                        vggt_features = vggt_features.view(-1, vggt_features.shape[-1]) #[F, D]
-                        
+                        vggt_features = vggt_features.view(
+                            -1, vggt_features.shape[-1]
+                        )  # [F, D]
+
                         if vggt_features.shape[0] == video_embeds.shape[0]:
-                            video_embeds = video_embeds + self.vggt_fusion_weight * vggt_features
+                            video_embeds = (
+                                video_embeds + self.vggt_fusion_weight * vggt_features
+                            )
                     except Exception as e:
                         print(f"Warning: VGGT processing failed: {e}")
                         import traceback
+
                         traceback.print_exc()
-                
+
                 mask = input_ids == self.config.video_token_id
                 video_mask = mask.unsqueeze(-1).expand_as(inputs_embeds)
-                video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+                video_embeds = video_embeds.to(
+                    inputs_embeds.device, inputs_embeds.dtype
+                )
                 inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
-            
+
             if attention_mask is not None:
                 attention_mask = attention_mask.to(inputs_embeds.device)
-        
-        if position_ids is None and (attention_mask is None or attention_mask.ndim == 2):
+
+        if position_ids is None and (
+            attention_mask is None or attention_mask.ndim == 2
+        ):
             position_ids, rope_deltas = self.get_rope_index(
-                input_ids, image_grid_thw, video_grid_thw, second_per_grid_ts, attention_mask
+                input_ids,
+                image_grid_thw,
+                video_grid_thw,
+                second_per_grid_ts,
+                attention_mask,
             )
             self.rope_deltas = rope_deltas
         else:
             batch_size, seq_length, _ = inputs_embeds.shape
             delta = (
                 (cache_position[0] + self.rope_deltas).to(inputs_embeds.device)
-                if cache_position is not None else 0
+                if cache_position is not None
+                else 0
             )
             position_ids = torch.arange(seq_length, device=inputs_embeds.device)
             position_ids = position_ids.view(1, -1).expand(batch_size, -1)
@@ -519,7 +601,7 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
                 delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
             position_ids = position_ids.add(delta)
             position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
-        
+
         outputs = self.model(
             input_ids=None,
             position_ids=position_ids,
@@ -532,10 +614,10 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
             return_dict=return_dict,
             cache_position=cache_position,
         )
-        
+
         hidden_states = outputs[0]
         logits = self.lm_head(hidden_states)
-        
+
         loss = None
         if labels is not None:
             logits = logits.float()
@@ -546,11 +628,11 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
             shift_labels = shift_labels.view(-1)
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
-        
+
         if not return_dict:
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
-        
+
         return Qwen2_5_VLCausalLMOutputWithPast(
             loss=loss,
             logits=logits,
@@ -617,5 +699,6 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
         video_nums = torch.sum(vision_first_mask & video_mask, dim=1)
 
         return image_nums, video_nums
+
 
 __all__ = ["Qwen2_5_VLForConditionalGenerationWithVGGT"]

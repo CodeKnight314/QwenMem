@@ -19,6 +19,7 @@ from transformers.utils import (
 )
 from torch.nn import CrossEntropyLoss
 from PIL import Image
+from .blocks import DecoderBlock
 
 @dataclass
 class VGGTMergerConfig:
@@ -41,11 +42,6 @@ class VGGTMerger(nn.Module):
             self.input_dim * self.temporal_merge_size * (self.spatial_merge_size ** 2)
         )
         self.token_merge_ln_q = Qwen2RMSNorm(self.token_merge_in_dim)
-        # self.token_merge_mlp = nn.Sequential(
-        #     nn.Linear(self.token_merge_in_dim, self.token_merge_in_dim),
-        #     nn.GELU(),
-        #     nn.Linear(self.token_merge_in_dim, self.output_dim),
-        # )
         self.token_merge_mlp = nn.Linear(self.token_merge_in_dim, self.output_dim)
 
         self.vgg_to_language_ln_q = Qwen2RMSNorm(self.output_dim)
@@ -110,7 +106,6 @@ class VGGTMerger(nn.Module):
         
         return x
 
-
 class VGGTEncoder(nn.Module):
     def __init__(
         self,
@@ -124,7 +119,6 @@ class VGGTEncoder(nn.Module):
         self.freeze = freeze
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
-        # Don't initialize VGGT yet - will be done later
         self.model = None
         self.merger = VGGTMerger(config)
         self.target_size = target_size
@@ -257,6 +251,140 @@ class VGGTEncoder(nn.Module):
         self.device = device if isinstance(device, str) else str(device)
         return super().to(device)
 
+class CUT3RStyleMemory(nn.Module):
+    def __init__(
+        self,
+        state_size: int = 768,
+        state_dim: int = 768,
+        visual_dim: int = 1024,
+        num_heads: int = 12,
+        depth: int = 12,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = True,
+        norm_layer: nn.Module = nn.LayerNorm,
+        state_pe: str = "2d",
+        rope=None,
+    ):
+        super().__init__()
+
+        self.state_size = state_size
+        self.state_dim = state_dim
+        self.visual_dim = visual_dim
+        self.num_heads = num_heads
+        self.depth = depth
+        self.state_pe = state_pe
+
+        self.register_tokens = nn.Embedding(state_size, state_dim)
+        self.decoder_embed_state = nn.Linear(state_dim, state_dim, bias=True)
+        self.decoder_embed_visual = nn.Linear(visual_dim, state_dim, bias=True)
+        self.encode_visual = nn.Linear(state_dim, visual_dim, bias=True)
+
+        self.dec_blocks_state = nn.ModuleList([
+            DecoderBlock(
+                dim=state_dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                norm_layer=norm_layer,
+                norm_mem=True,
+                rope=rope
+            )
+            for _ in range(depth)
+        ])
+
+        self.dec_blocks = nn.ModuleList([
+            DecoderBlock(
+                dim=state_dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                norm_layer=norm_layer,
+                norm_mem=True,
+                rope=rope
+            )
+            for _ in range(depth)
+        ])
+
+        # Freeze the decoder blocks
+        for param in self.dec_blocks_state.parameters():
+            param.requires_grad = False
+        for param in self.dec_blocks.parameters():
+            param.requires_grad = False
+
+        self.dec_norm_state = norm_layer(state_dim)
+        self.dec_norm_visual = norm_layer(state_dim)
+
+    def _init_position_encoding(self):
+        if self.state_pe == "2d":
+            width = int(self.state_size ** 0.5)
+            width = width + 1 if width % 2 == 1 else width
+            pe = torch.tensor(
+                [[i // width, i % width] for i in range(self.state_size)],
+                dtype=torch.float32
+            )
+        elif self.state_pe == "1d":
+            pe = torch.tensor([[i, i] for i in range(self.state_size)], dtype=torch.float32)
+        else:
+            self.register_buffer('state_pos', None)
+            return
+            
+        self.register_buffer('state_pos', pe)
+
+    def init_state(self, batch_size: int, device: torch.device):
+        state_feat = self.register_tokens(
+            torch.arange(self.state_size, device=device)
+        )
+        state_feat = state_feat.unsqueeze(0).expand(batch_size, -1, -1)
+        state_feat = self.decoder_embed_state(state_feat)
+
+        if hasattr(self, 'state_pos') and self.state_pos is not None:
+            state_pos = self.state_pos.unsqueeze(0).expand(batch_size, -1, -1).to(device)
+        else: 
+            state_pos = None
+
+        return state_feat, state_pos
+
+    def _recurrent_rollout(
+        self,
+        state_feat: torch.Tensor,
+        state_pos: Optional[torch.Tensor],
+        visual_feat: torch.Tensor,
+        visual_pos: Optional[torch.Tensor],
+    ):
+        visual_feat = self.decoder_embed_visual(visual_feat)
+        final_output = [(state_feat, visual_feat)]
+
+        for blk_state, blk_visual in zip(self.dec_blocks_state, self.dec_blocks):
+            prev_state, prev_visual = final_output[-1]
+
+            new_state, _ = blk_state(prev_state, prev_visual, state_pos, visual_pos)
+            new_visual, _ = blk_visual(prev_visual, prev_state, visual_pos, state_pos)
+            final_output.append((new_state, new_visual))
+
+        updated_state = self.dec_norm_state(final_output[-1][0])
+        updated_visual = self.dec_norm_visual(final_output[-1][1])
+        return updated_state, updated_visual
+
+    def forward(
+        self,
+        visual_feat: torch.Tensor,
+        state_feat: Optional[torch.Tensor] = None,
+        visual_pos: Optional[torch.Tensor] = None,
+        state_pos: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        batch_size = visual_feat.shape[0]
+        device = visual_feat.device
+
+        if state_feat is None:
+            state_feat, state_pos = self.init_state(batch_size, device)
+
+        self._init_position_encoding()
+        updated_state, updated_visual = self._recurrent_rollout(
+            state_feat, state_pos, visual_feat, visual_pos
+        )
+        updated_visual = self.encode_visual(updated_visual).to(visual_feat.dtype)
+        return updated_state, updated_visual
+
 # Missing constants
 _CONFIG_FOR_DOC = "Qwen2_5_VLConfig"
 QWEN2_5_VL_INPUTS_DOCSTRING = r"""
@@ -265,44 +393,36 @@ QWEN2_5_VL_INPUTS_DOCSTRING = r"""
 """
 
 
-class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLPreTrainedModel, GenerationMixin):
-    _tied_weights_keys = ["lm_head.weight"]
-    config_class = Qwen2_5_VLConfig
-
+class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLForConditionalGeneration):
     def __init__(self, config):
         super().__init__(config)
-
+        
         vggt_config = VGGTMergerConfig(output_dim=config.hidden_size)
         self.vggt = VGGTEncoder(vggt_config, freeze=True)
         
         self.vggt_fusion_weight = getattr(config, "vggt_fusion_weight", 0.3)
 
         self.memory = CUT3RStyleMemory(
-            visual_dim=config.hidden_size,
+            visual_dim=config.hidden_size
         )
 
         self.state_feat = None
 
-    @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-        base = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            pretrained_model_name_or_path, *model_args, **kwargs
-        )
-        self = cls(base.config)
-        
-        self.visual = base.visual
-        self.model = base.model
-        self.lm_head = base.lm_head
-
-        if self.memory is not None:
-            self.memory = self.memory.to(base.device)
-
-        self.vggt._initialize_vggt()
-        self.vggt = self.vggt.to(base.device)
-
         self.rope_deltas = None
-        
-        return self
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
+        model = super().from_pretrained(
+            pretrained_model_name_or_path,
+            ignore_mismatched_sizes=True,
+            trust_remote_code=True,
+            *args,
+            **kwargs,
+        )
+
+        model.vggt._initialize_vggt()
+
+        return model
 
     def get_input_embeddings(self):
         return self.model.get_input_embeddings()
@@ -324,7 +444,6 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLPreTrainedModel, Ge
         second_per_grid_ts: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # [Your existing implementation stays exactly the same]
         spatial_merge_size = self.config.vision_config.spatial_merge_size
         image_token_id = self.config.image_token_id
         video_token_id = self.config.video_token_id
@@ -454,6 +573,8 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLPreTrainedModel, Ge
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        images_tensor: Optional[torch.Tensor] = None,
+        videos_tensor: Optional[torch.Tensor] = None, 
         pixel_values: Optional[torch.Tensor] = None,
         pixel_values_videos: Optional[torch.FloatTensor] = None,
         image_grid_thw: Optional[torch.LongTensor] = None,
@@ -472,6 +593,7 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLPreTrainedModel, Ge
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
+        # Reset memory if requested
         if reset_memory and self.memory is not None:
             self.state_feat = None
 
@@ -484,15 +606,20 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLPreTrainedModel, Ge
                 
                 image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
                 
-                try:
-                    vggt_features = self.vggt(pixel_values, media_type="images")
-                    vggt_features = vggt_features.view(-1, vggt_features.shape[-1]) #[F, D]
-                    
-                    if vggt_features.shape[0] == image_embeds.shape[0]:
-                        image_embeds = image_embeds + self.vggt_fusion_weight * vggt_features
-                except Exception as e:
-                    print(f"Warning: VGGT processing failed: {e}")
-                
+                if images_tensor is not None:
+                    try:
+                        images_tensor = images_tensor.to(dtype=self.visual.dtype,
+                                         device=image_embeds.device,
+                                         non_blocking=True)
+                        images_tensor.requires_grad_(True)          
+                        vggt_features = self.vggt(images_tensor, media_type="images")
+                        vggt_features = vggt_features.view(-1, vggt_features.shape[-1]) #[F, D]
+                        
+                        if vggt_features.shape[0] == image_embeds.shape[0]:
+                            image_embeds = image_embeds + self.vggt_fusion_weight * vggt_features
+                    except Exception as e:
+                        print(f"Warning: VGGT processing failed: {e}")
+
                 if self.memory is not None and video_grid_thw is not None and len(video_grid_thw) > 0:
                     device = image_embeds.device
                     batch_size = input_ids.shape[0]
@@ -540,14 +667,21 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLPreTrainedModel, Ge
                 pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
                 video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
 
-                try: 
-                    vggt_features = self.vggt(pixel_values_videos, media_type="video")
-                    vggt_features = vggt_features.view(-1, vggt_features.shape[-1]) #[F, D]
-                    
-                    if vggt_features.shape[0] == video_embeds.shape[0]:
-                        video_embeds = video_embeds + self.vggt_fusion_weight * vggt_features
-                except Exception as e:
-                    print(f"Warning: VGGT processing failed: {e}")
+                if videos_tensor is not None:
+                    try: 
+                        videos_tensor = videos_tensor.to(dtype=self.visual.dtype,
+                                         device=video_embeds.device,
+                                         non_blocking=True)
+                        videos_tensor.requires_grad_(True)
+                        vggt_features = self.vggt(videos_tensor, media_type="video")
+                        vggt_features = vggt_features.view(-1, vggt_features.shape[-1]) #[F, D]
+                        
+                        if vggt_features.shape[0] == video_embeds.shape[0]:
+                            video_embeds = video_embeds + self.vggt_fusion_weight * vggt_features
+                    except Exception as e:
+                        print(f"Warning: VGGT processing failed: {e}")
+                        import traceback
+                        traceback.print_exc()
                 
                 if self.memory is not None and video_grid_thw is not None and len(video_grid_thw) > 0:
                     dim = video_embeds.shape[-1]

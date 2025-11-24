@@ -120,9 +120,6 @@ def run_vsi_eval(
                 continue
 
             frames = sample_frames(video_path, n_frames)
-            image_tensor = torch.stack([ToTensor()(frame) for frame in frames])
-            image_tensor = image_tensor.unsqueeze(0).repeat(len(batch_prompts),1,1,1,1)
-            image_tensor = image_tensor.to(DEVICE, dtype=torch.float16)
             if not frames:
                 continue
 
@@ -186,6 +183,10 @@ def run_vsi_eval(
                     return_tensors="pt",
                     padding=True
                 ).to(DEVICE)
+
+                image_tensor = torch.stack([ToTensor()(frame) for frame in frames])
+                image_tensor = image_tensor.unsqueeze(0).repeat(len(batch_prompts),1,1,1,1)
+                image_tensor = image_tensor.to(DEVICE, dtype=torch.float16)
                 
                 outputs = model.generate(
                     **inputs, 
