@@ -414,8 +414,6 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLForConditionalGener
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
         model = super().from_pretrained(
             pretrained_model_name_or_path,
-            ignore_mismatched_sizes=True,
-            trust_remote_code=True,
             *args,
             **kwargs,
         )
