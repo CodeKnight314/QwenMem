@@ -4,14 +4,14 @@ from torch._inductor.utils import aggregate_origins
 import torch.nn as nn
 from typing import Optional, Tuple, List, Union
 from dataclasses import dataclass
-from modeling_qwen2_5_vl import (
+from .modeling_qwen2_5_vl import (
     Qwen2_5_VLForConditionalGeneration,
     Qwen2_5_VLPreTrainedModel,
     Qwen2_5_VLCausalLMOutputWithPast,
     Qwen2RMSNorm,
 )
-from configuration_qwen2_5_vl import Qwen2_5_VLConfig
-from vggt import VGGT
+from .configuration_qwen2_5_vl import Qwen2_5_VLConfig
+from .vggt import VGGT
 from transformers.generation import GenerationMixin
 from transformers.utils import (
     add_start_docstrings_to_model_forward,

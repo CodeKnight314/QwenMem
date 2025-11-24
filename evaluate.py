@@ -75,8 +75,8 @@ def run_vsi_eval(
 
     print(f"🚀 Loading model: {model_name}")
     from transformers import AutoProcessor, AutoModelForImageTextToText
-    from src.QwenMem.modeling_qwen2_5_vl_with_vggt import Qwen2_5_VLForConditionalGenerationWithVGGT
-    from src.QwenMem.modeling_qwen2_5_vl_with_memory import Qwen2_5_VLForConditionalGenerationWithMemory
+    from src.modeling_qwen2_5_vl_with_vggt import Qwen2_5_VLForConditionalGenerationWithVGGT
+    from src.modeling_qwen2_5_vl_with_memory import Qwen2_5_VLForConditionalGenerationWithMemory
 
     processor = AutoProcessor.from_pretrained(
         model_name, trust_remote_code=True, use_fast=True
@@ -272,4 +272,4 @@ if __name__ == "__main__":
     parser.add_argument("--n", default=32, type=int)
     parser.add_argument("--b", default=4, type=int)
     args = parser.parse_args()
-    run_vsi_eval(args.model, args.out_dir, args.n_frames, args.batch_size)
+    run_vsi_eval(args.m, args.o, args.n, args.b)
