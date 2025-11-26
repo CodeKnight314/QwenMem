@@ -41,6 +41,14 @@ from ..extras.packages import (
     is_transformers_version_greater_than,
 )
 
+from torchvision.transforms import PILToTensor
+
+def _pil_list_to_batch_tensor(pil_list: list["Image.Image"]) -> "torch.Tensor":
+    """
+    pil_list: list of PIL images (all same size after _regularize_images)
+    returns:  [N, 3, H, W]  uint8  (VGGT wants byte input)
+    """
+    return torch.stack([PILToTensor()(img) for img in pil_list], dim=0).unsqueeze(0)
 
 if is_librosa_available():
     import librosa
@@ -1474,14 +1482,6 @@ class Qwen2VLPlugin(BasePlugin):
 
         return {"videos": results, "fps_per_video": fps_per_video, "durations": durations}
 
-    def _pil_list_to_batch_tensor(self, pil_list: list["Image.Image"]) -> "torch.Tensor":
-        """
-        pil_list: list of PIL images (all same size after _regularize_images)
-        returns:  [N, 3, H, W]  uint8  (VGGT wants byte input)
-        """
-        from torchvision.transforms import PILToTensor
-        return torch.stack([PILToTensor()(img) for img in pil_list], dim=0).float().unsqueeze(0)
-
     @override
     def _get_mm_inputs(
         self,
@@ -1500,7 +1500,7 @@ class Qwen2VLPlugin(BasePlugin):
                 image_min_pixels=getattr(processor, "image_min_pixels", 32 * 32),
             )["images"]
             mm_inputs.update(image_processor(images, return_tensors="pt"))
-            mm_inputs["images_tensor"] = self._pil_list_to_batch_tensor(images)
+            mm_inputs["images_tensor"] = _pil_list_to_batch_tensor(images)
 
         if len(videos) != 0:
             video_data = self._regularize_videos(
@@ -1515,6 +1515,7 @@ class Qwen2VLPlugin(BasePlugin):
             if "second_per_grid_ts" in processor.model_input_names:
                 mm_inputs["second_per_grid_ts"] = [temporal_patch_size / fps for fps in video_data["fps_per_video"]]
             mm_inputs["videos_tensor"] = mm_inputs["pixel_values_videos"].clone()
+
         return mm_inputs
 
     @override

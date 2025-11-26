@@ -22,7 +22,7 @@ export TRITON_CACHE_DIR=/scratch/tang.ri/triton_cache
 export FORCE_TORCHRUN=1
 
 conda activate conda_env/qwenmem/
-cd QwenMem/scripts/
+cd QwenMem/
 
 torchrun --nproc_per_node=4 -- evaluate.py \
     --m RichardGTang/Qwen2_5_VL-3B-WithMemory \
