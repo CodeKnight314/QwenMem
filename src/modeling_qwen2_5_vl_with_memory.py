@@ -129,6 +129,12 @@ class VGGTEncoder(nn.Module):
             self.model = VGGT.from_pretrained("facebook/VGGT-1B")
             self.model.camera_head = None
             self.model.track_head = None
+
+            target_dtype = next(self.merger.parameters()).dtype
+            if target_dtype == torch.float16:
+                self.model.half()
+            elif target_dtype == torch.bfloat16:
+                self.model.bfloat16()
             
             if self.freeze:
                 for param in self.model.parameters():
@@ -225,7 +231,7 @@ class VGGTEncoder(nn.Module):
             else: 
                 media_type = "video"
 
-        pixel_values = pixel_values.float()
+        pixel_values = pixel_values.to(self.model.parameters().__next__().dtype)
         pixel_values = self._preprocess_tensor(pixel_values, preprocessing_mode)
 
         pixel_values = pixel_values.to(self.device)
@@ -580,8 +586,7 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLForConditionalGener
         rope_deltas: Optional[torch.LongTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
         second_per_grid_ts: Optional[torch.Tensor] = None,
-        images_vggt: Optional[List[Image.Image]] = None,  # PIL Images for VGGT
-        reset_memory: bool = True,  # Whether to reset memory
+        reset_memory: bool = True,
         **kwargs,
     ) -> Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:
         
@@ -591,11 +596,9 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLForConditionalGener
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
-        # Reset memory if requested
         if reset_memory and self.memory is not None:
             self.state_feat = None
 
-        # Build input embeddings
         if inputs_embeds is None:
             inputs_embeds = self.model.get_input_embeddings()(input_ids)
             
