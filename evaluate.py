@@ -160,7 +160,7 @@ def run_vsi_eval(
                 model = Qwen2_5_VLForConditionalGenerationWithVGGT.from_pretrained(
                     model_name, 
                     trust_remote_code=True,
-                    torch_dtype=torch.float16
+                    dtype=torch.float16
                 ).to(device)
             else:
                 # For single GPU or DataParallel, use device_map
@@ -174,7 +174,7 @@ def run_vsi_eval(
                 model = Qwen2_5_VLForConditionalGenerationWithMemory.from_pretrained(
                     model_name,
                     trust_remote_code=True,
-                    torch_dtype=torch.float16
+                    dtype=torch.float16
                 ).to(device)
             else:
                 model = Qwen2_5_VLForConditionalGenerationWithMemory.from_pretrained(
@@ -187,7 +187,7 @@ def run_vsi_eval(
                 model = AutoModelForImageTextToText.from_pretrained(
                     model_name,
                     trust_remote_code=True,
-                    torch_dtype=torch.float16
+                    dtype=torch.float16
                 ).to(device)
             else:
                 model = AutoModelForImageTextToText.from_pretrained(
@@ -200,7 +200,7 @@ def run_vsi_eval(
             model = AutoModelForImageTextToText.from_pretrained(
                 model_name,
                 trust_remote_code=True,
-                torch_dtype=torch.float16
+                dtype=torch.float16
             ).to(device)
         else:
             model = AutoModelForImageTextToText.from_pretrained(
