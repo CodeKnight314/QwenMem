@@ -10,7 +10,7 @@ do_train: true
 finetuning_type: lora
 lora_rank: 8
 lora_target: q_proj,k_proj,v_proj,o_proj
-additional_target: token_merge_ln_q, vgg_to_language_ln_q, vgg_to_language_mlp, token_merge_mlp, decoder_embed_state, decoder_embed_visual
+additional_target: token_merge_ln_q, vgg_to_language_ln_q, vgg_to_language_mlp_1, vgg_to_language_gelu, vgg_to_language_mlp_2, token_merge_mlp_1, token_merge_gelu, token_merge_mlp_2, decoder_embed_state, decoder_embed_visual
 deepspeed: /projects/vig/tangri/QwenMem/LLaMA-Factory/examples/deepspeed/ds_z3_config.json
 
 ## dataset

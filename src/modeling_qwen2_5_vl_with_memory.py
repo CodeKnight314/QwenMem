@@ -42,9 +42,15 @@ class VGGTMerger(nn.Module):
             self.input_dim * self.temporal_merge_size * (self.spatial_merge_size ** 2)
         )
         self.token_merge_ln_q = Qwen2RMSNorm(self.token_merge_in_dim)
+        # self.token_merge_mlp_1 = nn.Linear(self.token_merge_in_dim, self.output_dim)
+        # self.token_merge_gelu = nn.GELU()
+        # self.token_merge_mlp_2 = nn.Linear(self.output_dim, self.output_dim)
         self.token_merge_mlp = nn.Linear(self.token_merge_in_dim, self.output_dim)
 
         self.vgg_to_language_ln_q = Qwen2RMSNorm(self.output_dim)
+        # self.vgg_to_language_mlp_1 = nn.Linear(self.output_dim, self.output_dim) 
+        # self.vgg_to_language_gelu = nn.GELU()
+        # self.vgg_to_language_mlp_2 = nn.Linear(self.output_dim, self.output_dim)
         self.vgg_to_language_mlp = nn.Linear(self.output_dim, self.output_dim)
 
     def merge_tokens(self, tokens: torch.Tensor, images_shape: Tuple) -> torch.Tensor:
@@ -84,6 +90,9 @@ class VGGTMerger(nn.Module):
         )
 
         tokens = self.token_merge_ln_q(tokens)
+        # tokens = self.token_merge_mlp_1(tokens)
+        # tokens = self.token_merge_gelu(tokens)
+        # tokens = self.token_merge_mlp_2(tokens)
         tokens = self.token_merge_mlp(tokens)
         return tokens
 
@@ -102,6 +111,9 @@ class VGGTMerger(nn.Module):
         tokens = self.merge_tokens(tokens, images_shape)
         
         x = self.vgg_to_language_ln_q(tokens)
+        # x = self.vgg_to_language_mlp_1(x)
+        # x = self.vgg_to_language_gelu(x)
+        # x = self.vgg_to_language_mlp_2(x)
         x = self.vgg_to_language_mlp(x)
         
         return x
@@ -149,8 +161,13 @@ class VGGTEncoder(nn.Module):
         is_video = pixel_values.ndim == 5
 
         if pixel_values.ndim == 4:
+            # [F, C, H, W] -> [1, F, C, H, W]
+            pixel_values = pixel_values.unsqueeze(0)
+        elif pixel_values.ndim == 3:
+            # [C, H, W] -> [1, 2, C, H, W]
             pixel_values = pixel_values.unsqueeze(1)
             pixel_values = pixel_values.repeat_interleave(2, dim=1)
+            pixel_values = pixel_values.unsqueeze(0)
 
         B, F, C, H, W = pixel_values.shape
 
