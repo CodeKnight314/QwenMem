@@ -19,7 +19,6 @@ from transformers.utils import (
 from torch.nn import CrossEntropyLoss
 from PIL import Image
 
-
 @dataclass
 class VGGTMergerConfig:
     input_dim: int = 2048
@@ -27,7 +26,6 @@ class VGGTMergerConfig:
     patch_size: int = 14
     temporal_merge_size: int = 2
     spatial_merge_size: int = 2
-
 
 class VGGTMerger(nn.Module):
     def __init__(self, config: VGGTMergerConfig):
@@ -39,18 +37,17 @@ class VGGTMerger(nn.Module):
         self.output_dim = config.output_dim
 
         self.token_merge_in_dim = (
-            self.input_dim * self.temporal_merge_size * (self.spatial_merge_size**2)
+            self.input_dim * self.temporal_merge_size * (self.spatial_merge_size ** 2)
         )
         self.token_merge_ln_q = Qwen2RMSNorm(self.token_merge_in_dim)
-        # self.token_merge_mlp = nn.Sequential(
-        #     nn.Linear(self.token_merge_in_dim, self.token_merge_in_dim),
-        #     nn.GELU(),
-        #     nn.Linear(self.token_merge_in_dim, self.output_dim),
-        # )
-        self.token_merge_mlp = nn.Linear(self.token_merge_in_dim, self.output_dim)
+        self.token_merge_mlp_1 = nn.Linear(self.token_merge_in_dim, self.output_dim)
+        self.token_merge_gelu = nn.GELU()
+        self.token_merge_mlp_2 = nn.Linear(self.output_dim, self.output_dim)
 
         self.vgg_to_language_ln_q = Qwen2RMSNorm(self.output_dim)
-        self.vgg_to_language_mlp = nn.Linear(self.output_dim, self.output_dim)
+        self.vgg_to_language_mlp_1 = nn.Linear(self.output_dim, self.output_dim) 
+        self.vgg_to_language_gelu = nn.GELU()
+        self.vgg_to_language_mlp_2 = nn.Linear(self.output_dim, self.output_dim)
 
     def merge_tokens(self, tokens: torch.Tensor, images_shape: Tuple) -> torch.Tensor:
         H, W = images_shape[-2:]
@@ -67,7 +64,7 @@ class VGGTMerger(nn.Module):
         usable_h = NUM_PATCH_H - (NUM_PATCH_H % self.spatial_merge_size)
         usable_w = NUM_PATCH_W - (NUM_PATCH_W % self.spatial_merge_size)
         tokens = tokens[:, :, :usable_h, :usable_w, :]
-
+        
         tokens = tokens.view(
             B,
             F // self.temporal_merge_size,
@@ -85,14 +82,13 @@ class VGGTMerger(nn.Module):
             F // self.temporal_merge_size,
             usable_h // self.spatial_merge_size,
             usable_w // self.spatial_merge_size,
-            self.temporal_merge_size
-            * self.spatial_merge_size
-            * self.spatial_merge_size
-            * D,
+            self.temporal_merge_size * self.spatial_merge_size * self.spatial_merge_size * D,
         )
 
         tokens = self.token_merge_ln_q(tokens)
-        tokens = self.token_merge_mlp(tokens)
+        tokens = self.token_merge_mlp_1(tokens)
+        tokens = self.token_merge_gelu(tokens)
+        tokens = self.token_merge_mlp_2(tokens)
         return tokens
 
     def forward(
@@ -103,17 +99,18 @@ class VGGTMerger(nn.Module):
         media_type: str = "video",
     ) -> torch.Tensor:
         tokens = aggregated_tokens_list[-1][:, :, patch_start_idx:]
-
+        
         if media_type == "images":
             tokens = tokens.repeat_interleave(2, dim=1)
-
+        
         tokens = self.merge_tokens(tokens, images_shape)
-
+        
         x = self.vgg_to_language_ln_q(tokens)
-        x = self.vgg_to_language_mlp(x)
-
+        x = self.vgg_to_language_mlp_1(x)
+        x = self.vgg_to_language_gelu(x)
+        x = self.vgg_to_language_mlp_2(x)
+        
         return x
-
 
 class VGGTEncoder(nn.Module):
     def __init__(
@@ -123,15 +120,15 @@ class VGGTEncoder(nn.Module):
         target_size: int = 518,
     ):
         super().__init__()
-
+        
         self.config = config
         self.freeze = freeze
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-
+        
         self.model = None
         self.merger = VGGTMerger(config)
         self.target_size = target_size
-
+        
     def _initialize_vggt(self):
         """Initialize VGGT model - called after parent model is loaded"""
         if self.model is None:
@@ -139,23 +136,32 @@ class VGGTEncoder(nn.Module):
             self.model.camera_head = None
             self.model.track_head = None
 
+            target_dtype = next(self.merger.parameters()).dtype
+            if target_dtype == torch.float16:
+                self.model.half()
+            elif target_dtype == torch.bfloat16:
+                self.model.bfloat16()
+            
             if self.freeze:
                 for param in self.model.parameters():
                     param.requires_grad = False
-
+    
     def _adjust_to_patch_size(self, size: int):
         return (size // 14) * 14
-
-    def _preprocess_tensor(
-        self, pixel_values: torch.Tensor, mode: str = "pad"
-    ) -> torch.Tensor:
-        assert (
-            pixel_values.ndim == 4 or pixel_values.ndim == 5
-        ), f"Invalid shape of tensor: {pixel_values.shape}"
+ 
+    def _preprocess_tensor(self, pixel_values: torch.Tensor, mode: str = "pad") -> torch.Tensor:
+        assert pixel_values.ndim == 4 or pixel_values.ndim == 5, f"Invalid shape of tensor: {pixel_values.shape}"
+        
+        is_video = pixel_values.ndim == 5
 
         if pixel_values.ndim == 4:
+            # [F, C, H, W] -> [1, F, C, H, W]
+            pixel_values = pixel_values.unsqueeze(0)
+        elif pixel_values.ndim == 3:
+            # [C, H, W] -> [1, 2, C, H, W]
             pixel_values = pixel_values.unsqueeze(1)
             pixel_values = pixel_values.repeat_interleave(2, dim=1)
+            pixel_values = pixel_values.unsqueeze(0)
 
         B, F, C, H, W = pixel_values.shape
 
@@ -171,65 +177,72 @@ class VGGTEncoder(nn.Module):
             new_w = self._adjust_to_patch_size(int(W * scale))
 
             pixel_values = torch.nn.functional.interpolate(
-                pixel_values, size=(new_h, new_w), mode="bilinear", align_corners=True
+                pixel_values, 
+                size=(new_h, new_w), 
+                mode="bilinear", 
+                align_corners=True
             )
 
             pad_h = (target_size - new_h) // 2
             pad_w = (target_size - new_w) // 2
             pixel_values = torch.nn.functional.pad(
                 pixel_values,
-                (
-                    pad_w,
-                    target_size - new_w - pad_w,
-                    pad_h,
-                    target_size - new_h - pad_h,
-                ),
-                value=1.0,
+                (pad_w, target_size - new_w - pad_w, pad_h, target_size - new_h - pad_h),
+                value=1.0
             )
         else:
             scale = target_size / W
             new_h = int(H * scale)
             new_w = target_size
-
+            
             pixel_values = torch.nn.functional.interpolate(
-                pixel_values, size=(new_h, new_w), mode="bilinear", align_corners=False
+                pixel_values,
+                size=(new_h, new_w),
+                mode='bilinear',
+                align_corners=False
             )
-
+            
             if new_h > target_size:
                 start_h = (new_h - target_size) // 2
-                pixel_values = pixel_values[:, :, start_h : start_h + target_size, :]
+                pixel_values = pixel_values[:, :, start_h:start_h + target_size, :]
             else:
                 pad_h = (target_size - new_h) // 2
                 pixel_values = torch.nn.functional.pad(
-                    pixel_values, (0, 0, pad_h, target_size - new_h - pad_h), value=1.0
+                    pixel_values,
+                    (0, 0, pad_h, target_size - new_h - pad_h),
+                    value=1.0
                 )
-
+        
         final_h = self._adjust_to_patch_size(pixel_values.shape[2])
         final_w = self._adjust_to_patch_size(pixel_values.shape[3])
         if pixel_values.shape[2] != final_h or pixel_values.shape[3] != final_w:
             pixel_values = torch.nn.functional.interpolate(
                 pixel_values,
                 size=(final_h, final_w),
-                mode="bilinear",
-                align_corners=False,
+                mode='bilinear',
+                align_corners=False
             )
-
+        
         pixel_values = pixel_values.view(B, F, C, final_h, final_w)
-
+                
         return pixel_values
 
     def forward(
-        self,
+        self, 
         pixel_values: torch.Tensor,
         media_type: str = "video",
-        preprocessing_mode: str = "pad",
+        preprocessing_mode: str = "pad"
     ) -> torch.Tensor:
+        if self.model is None:
+            self._initialize_vggt()
+        
         if media_type == "auto":
             if pixel_values.ndim == 4:
                 media_type = "images"
-            else:
+            else: 
                 media_type = "video"
 
+        pixel_values = pixel_values.to(self.model.parameters().__next__().dtype)
         pixel_values = self._preprocess_tensor(pixel_values, preprocessing_mode)
 
         pixel_values = pixel_values.to(self.device)
@@ -239,9 +252,7 @@ class VGGTEncoder(nn.Module):
         B, T = pixel_values.shape[:2]
         pixel_values_flat = pixel_values.view(B, T, -1, img_shape[0], img_shape[1])
 
-        aggregated_tokens_list, patch_start_idx = self.model.aggregator(
-            pixel_values_flat
-        )
+        aggregated_tokens_list, patch_start_idx = self.model.aggregator(pixel_values_flat)
 
         output = self.merger(
             aggregated_tokens_list=aggregated_tokens_list,
@@ -249,14 +260,13 @@ class VGGTEncoder(nn.Module):
             images_shape=img_shape,
             media_type=media_type,
         )
-
+        
         return output
-
+    
     def to(self, device):
         """Override to method to update self.device"""
         self.device = device if isinstance(device, str) else str(device)
         return super().to(device)
-
 
 class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGeneration):
     def __init__(self, config):

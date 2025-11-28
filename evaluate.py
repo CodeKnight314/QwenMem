@@ -310,15 +310,23 @@ def run_vsi_eval(
             try:
                 gen_model = model.module if hasattr(model, 'module') else model
                 
-                outputs = gen_model.generate(
-                    **inputs,
-                    images_tensor=image_tensor,
-                    do_sample=False,
-                    max_new_tokens=32,
-                    pad_token_id=processor.tokenizer.pad_token_id
-                )
+                if model_name != "RichardGTang/Qwen2_5_VL-3B-WithMemory" and model_name != "RichardGTang/Qwen2_5_VL-3B-WithVGGT":
+                    outputs = gen_model.generate(
+                        **inputs,
+                        do_sample=False,
+                        max_new_tokens=32,
+                        pad_token_id=processor.tokenizer.pad_token_id
+                    )
+                else:
+                    outputs = gen_model.generate(
+                        **inputs,
+                        images_tensor=image_tensor,
+                        do_sample=False,
+                        max_new_tokens=32,
+                        pad_token_id=processor.tokenizer.pad_token_id
+                    )
                 
-                generated_ids = outputs[inputs["input_ids"].shape[1]:]
+                generated_ids = outputs[0, inputs["input_ids"].shape[1]:]
                 pred = processor.decode(generated_ids, skip_special_tokens=True).strip()
             except Exception as e:
                 if is_main:
@@ -427,5 +435,24 @@ torchrun --nproc_per_node=4 -- evaluate.py \
     --m RichardGTang/Qwen2_5_VL-3B-WithMemory \
     --o vsi_bench_outputs/ \
     --n 16 \
+    --distributed
+"""
+
+"""
+torchrun --nproc_per_node=2 -- evaluate.py \
+    --m RichardGTang/Qwen2_5_VL-3B-WithMemory \
+    --o vsi_bench_outputs/ \
+    --num_gpus 2 \
+    --n 16 \
+    --ms 10 \
+    --distributed
+"""
+
+"""
+torchrun --nproc_per_node=2 -- evaluate.py \
+    --m Qwen/Qwen2.5-VL-3B-Instruct\
+    --o vsi_bench_outputs/ \
+    --n 16 \
+    --ms 10 \
     --distributed
 """

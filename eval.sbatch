@@ -2,7 +2,7 @@
 #SBATCH --job-name=qwenmem_eval
 #SBATCH --partition=jiang
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:a6000:1
+#SBATCH --gres=gpu:a6000:4
 #SBATCH --time=12:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8

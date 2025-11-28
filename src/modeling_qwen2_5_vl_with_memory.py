@@ -42,16 +42,14 @@ class VGGTMerger(nn.Module):
             self.input_dim * self.temporal_merge_size * (self.spatial_merge_size ** 2)
         )
         self.token_merge_ln_q = Qwen2RMSNorm(self.token_merge_in_dim)
-        # self.token_merge_mlp_1 = nn.Linear(self.token_merge_in_dim, self.output_dim)
-        # self.token_merge_gelu = nn.GELU()
-        # self.token_merge_mlp_2 = nn.Linear(self.output_dim, self.output_dim)
-        self.token_merge_mlp = nn.Linear(self.token_merge_in_dim, self.output_dim)
+        self.token_merge_mlp_1 = nn.Linear(self.token_merge_in_dim, self.output_dim)
+        self.token_merge_gelu = nn.GELU()
+        self.token_merge_mlp_2 = nn.Linear(self.output_dim, self.output_dim)
 
         self.vgg_to_language_ln_q = Qwen2RMSNorm(self.output_dim)
-        # self.vgg_to_language_mlp_1 = nn.Linear(self.output_dim, self.output_dim) 
-        # self.vgg_to_language_gelu = nn.GELU()
-        # self.vgg_to_language_mlp_2 = nn.Linear(self.output_dim, self.output_dim)
-        self.vgg_to_language_mlp = nn.Linear(self.output_dim, self.output_dim)
+        self.vgg_to_language_mlp_1 = nn.Linear(self.output_dim, self.output_dim) 
+        self.vgg_to_language_gelu = nn.GELU()
+        self.vgg_to_language_mlp_2 = nn.Linear(self.output_dim, self.output_dim)
 
     def merge_tokens(self, tokens: torch.Tensor, images_shape: Tuple) -> torch.Tensor:
         H, W = images_shape[-2:]
@@ -90,10 +88,9 @@ class VGGTMerger(nn.Module):
         )
 
         tokens = self.token_merge_ln_q(tokens)
-        # tokens = self.token_merge_mlp_1(tokens)
-        # tokens = self.token_merge_gelu(tokens)
-        # tokens = self.token_merge_mlp_2(tokens)
-        tokens = self.token_merge_mlp(tokens)
+        tokens = self.token_merge_mlp_1(tokens)
+        tokens = self.token_merge_gelu(tokens)
+        tokens = self.token_merge_mlp_2(tokens)
         return tokens
 
     def forward(
@@ -111,10 +108,9 @@ class VGGTMerger(nn.Module):
         tokens = self.merge_tokens(tokens, images_shape)
         
         x = self.vgg_to_language_ln_q(tokens)
-        # x = self.vgg_to_language_mlp_1(x)
-        # x = self.vgg_to_language_gelu(x)
-        # x = self.vgg_to_language_mlp_2(x)
-        x = self.vgg_to_language_mlp(x)
+        x = self.vgg_to_language_mlp_1(x)
+        x = self.vgg_to_language_gelu(x)
+        x = self.vgg_to_language_mlp_2(x)
         
         return x
 
@@ -838,6 +834,11 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLForConditionalGener
         if cache_position[0] != 0:
             model_inputs["pixel_values"] = None
             model_inputs["pixel_values_videos"] = None
+
+        reset_memory = kwargs.get("reset_memory", True)
+        if cache_position is not None and cache_position[0] > 0:
+            reset_memory = False
+        model_inputs["reset_memory"] = reset_memory
 
         return model_inputs
 

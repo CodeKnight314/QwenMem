@@ -24,4 +24,4 @@ export FORCE_TORCHRUN=1
 conda activate conda_env/qwenmem/
 cd QwenMem/LLaMA-Factory/
 
-lmf train ../configs/qwen2_5vl_vggt_sft_nframes_16.yaml
+lmf train ../configs/vggt/lora/qwen2_5vl_vggt_sft_nframes_16.yaml
