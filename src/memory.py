@@ -30,6 +30,7 @@ class CUT3RStyleMemory(nn.Module):
         self.register_tokens = nn.Embedding(state_size, state_dim)
         self.decoder_embed_state = nn.Linear(state_dim, state_dim, bias=True)
         self.decoder_embed_visual = nn.Linear(visual_dim, state_dim, bias=True)
+        self.encode_visual = nn.Linear(state_dim, visual_dim, bias=True)
 
         self.dec_blocks_state = nn.ModuleList([
             DecoderBlock(
@@ -134,72 +135,52 @@ class CUT3RStyleMemory(nn.Module):
         updated_state, updated_visual = self._recurrent_rollout(
             state_feat, state_pos, visual_feat, visual_pos
         )
-
+        updated_visual = self.encode_visual(updated_visual).to(visual_feat.dtype)
         return updated_state, updated_visual
 
-    def load_state_dict(self, checkpoint_path: str, strict: bool = False):
-        """
-        Load only transformer blocks (decoder blocks) from checkpoint.
-        Embeddings and norms are not loaded.
-        """
-        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-        if 'model' in checkpoint:
-            state_dict = checkpoint['model']
-        elif 'state_dict' in checkpoint:
-            state_dict = checkpoint['state_dict']
-        else:
-            state_dict = checkpoint
-            
-        if all(k.startswith('module.') for k in state_dict.keys()):
-            state_dict = {k[7:]: v for k, v in state_dict.items()}
-            
-        loaded_keys = []
-        
-        # Only load decoder blocks (transformer blocks)
-        for i in range(self.depth):
-            # Load dec_blocks_state
-            prefix_src = f"dec_blocks_state.{i}."
-            for k, v in state_dict.items():
-                if k.startswith(prefix_src):
-                    if k in self.state_dict():
-                        if v.shape == self.state_dict()[k].shape:
-                            self.state_dict()[k].copy_(v)
-                            loaded_keys.append(k)
-                        else:
-                            print(f"Shape mismatch for {k}: "
-                                  f"{v.shape} vs {self.state_dict()[k].shape}")
-                            
-            # Load dec_blocks
-            prefix_src = f"dec_blocks.{i}."
-            for k, v in state_dict.items():
-                if k.startswith(prefix_src):
-                    if k in self.state_dict():
-                        if v.shape == self.state_dict()[k].shape:
-                            self.state_dict()[k].copy_(v)
-                            loaded_keys.append(k)
-                        else:
-                            print(f"Shape mismatch for {k}: "
-                                  f"{v.shape} vs {self.state_dict()[k].shape}")
-        
-        print(f"Loaded {len(loaded_keys)} transformer block parameters from CUT3R checkpoint")
-        
-        if strict:
-            # Only check decoder blocks for strict mode
-            decoder_keys = {k for k in self.state_dict().keys() 
-                           if k.startswith('dec_blocks_state.') or k.startswith('dec_blocks.')}
-            loaded_set = set(loaded_keys)
-            missing = decoder_keys - loaded_set
-            if missing:
-                print(f"Missing decoder block keys: {missing}")
-                    
-        return loaded_keys
+class CUT3RStyleMemoryMR1(CUT3RStyleMemory):
+    def __init__(
+        self,
+        state_size: int = 768,
+        state_dim: int = 768,
+        visual_dim: int = 1024,
+        num_heads: int = 12,
+        depth: int = 12,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = True,
+        norm_layer: nn.Module = nn.LayerNorm,
+        state_pe: str = "2d",
+        alpha: float = 0.5,
+        rope=None,
+    ):
+        super().__init__(state_size, state_dim, visual_dim, num_heads, depth, mlp_ratio, qkv_bias, norm_layer, state_pe, rope)
+        self.alpha = alpha
 
-if __name__ == "__main__":
-    model = CUT3RStyleMemory()
-    model.load_state_dict(checkpoint_path="checkpoint.pth")
-    model.eval()
+    def forward(self, visual_feat: torch.Tensor, state_feat: Optional[torch.Tensor] = None, visual_pos: Optional[torch.Tensor] = None, state_pos: Optional[torch.Tensor] = None, memory_type: str = "cut3r"):
+        updated_state, updated_visual = super().forward(visual_feat, state_feat, visual_pos, state_pos)
+        residual = visual_feat + updated_visual * self.alpha
+        return updated_state, residual
 
-    visual_feat = torch.randn(1, 768, 1024)
-    state_feat, state_pos = model.init_state(1, "cpu")
-    updated_state, updated_visual = model(visual_feat, state_feat, state_pos)
-    print(updated_state.shape, updated_visual.shape)
+class CUT3RStyleMemoryMR2(CUT3RStyleMemory):
+    def __init__(
+        self,
+        state_size: int = 768,
+        state_dim: int = 768,
+        visual_dim: int = 1024,
+        num_heads: int = 12,
+        depth: int = 12,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = True,
+        norm_layer: nn.Module = nn.LayerNorm,
+        state_pe: str = "2d",
+        rope=None,
+    ):
+        super().__init__(state_size, state_dim, visual_dim, num_heads, depth, mlp_ratio, qkv_bias, norm_layer, state_pe, rope)
+        self.gate = nn.Linear(visual_dim, visual_dim)
+        self.gate_sigmoid = nn.Sigmoid()
+
+    def forward(self, visual_feat: torch.Tensor, state_feat: Optional[torch.Tensor] = None, visual_pos: Optional[torch.Tensor] = None, state_pos: Optional[torch.Tensor] = None, memory_type: str = "cut3r"):
+        updated_state, updated_visual = super().forward(visual_feat, state_feat, visual_pos, state_pos)
+        gate = self.gate_sigmoid(self.gate(updated_visual))
+        residual = gate * updated_visual + (1 - gate) * visual_feat
+        return updated_state, residual

@@ -6,7 +6,7 @@
 #SBATCH --time=24:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --output=slurm-%j.out
+#SBATCH --output=/scratch/tang.ri/qwenmem-%j.out
 #SBATCH --export=ALL
 
 echo "Job started on $(date)"

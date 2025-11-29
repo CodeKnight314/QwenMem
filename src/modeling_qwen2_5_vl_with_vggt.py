@@ -27,6 +27,7 @@ class VGGTMergerConfig:
     temporal_merge_size: int = 2
     spatial_merge_size: int = 2
 
+
 class VGGTMerger(nn.Module):
     def __init__(self, config: VGGTMergerConfig):
         super().__init__()
@@ -45,7 +46,7 @@ class VGGTMerger(nn.Module):
         self.token_merge_mlp_2 = nn.Linear(self.output_dim, self.output_dim)
 
         self.vgg_to_language_ln_q = Qwen2RMSNorm(self.output_dim)
-        self.vgg_to_language_mlp_1 = nn.Linear(self.output_dim, self.output_dim) 
+        self.vgg_to_language_mlp_1 = nn.Linear(self.output_dim, self.output_dim)
         self.vgg_to_language_gelu = nn.GELU()
         self.vgg_to_language_mlp_2 = nn.Linear(self.output_dim, self.output_dim)
 
@@ -61,17 +62,14 @@ class VGGTMerger(nn.Module):
             F += pad_f
 
         tokens = tokens.view(B, F, NUM_PATCH_H, NUM_PATCH_W, D)
-        usable_h = NUM_PATCH_H - (NUM_PATCH_H % self.spatial_merge_size)
-        usable_w = NUM_PATCH_W - (NUM_PATCH_W % self.spatial_merge_size)
-        tokens = tokens[:, :, :usable_h, :usable_w, :]
         
         tokens = tokens.view(
             B,
             F // self.temporal_merge_size,
             self.temporal_merge_size,
-            usable_h // self.spatial_merge_size,
+            NUM_PATCH_H // self.spatial_merge_size,
             self.spatial_merge_size,
-            usable_w // self.spatial_merge_size,
+            NUM_PATCH_W // self.spatial_merge_size,
             self.spatial_merge_size,
             D,
         )
@@ -80,8 +78,8 @@ class VGGTMerger(nn.Module):
         tokens = tokens.view(
             B,
             F // self.temporal_merge_size,
-            usable_h // self.spatial_merge_size,
-            usable_w // self.spatial_merge_size,
+            NUM_PATCH_H // self.spatial_merge_size,
+            NUM_PATCH_W // self.spatial_merge_size,
             self.temporal_merge_size * self.spatial_merge_size * self.spatial_merge_size * D,
         )
 
@@ -90,7 +88,7 @@ class VGGTMerger(nn.Module):
         tokens = self.token_merge_gelu(tokens)
         tokens = self.token_merge_mlp_2(tokens)
         return tokens
-
+    
     def forward(
         self,
         aggregated_tokens_list: List[torch.Tensor],
@@ -99,131 +97,88 @@ class VGGTMerger(nn.Module):
         media_type: str = "video",
     ) -> torch.Tensor:
         tokens = aggregated_tokens_list[-1][:, :, patch_start_idx:]
-        
+
         if media_type == "images":
             tokens = tokens.repeat_interleave(2, dim=1)
-        
+
         tokens = self.merge_tokens(tokens, images_shape)
-        
+
         x = self.vgg_to_language_ln_q(tokens)
         x = self.vgg_to_language_mlp_1(x)
         x = self.vgg_to_language_gelu(x)
         x = self.vgg_to_language_mlp_2(x)
-        
+
         return x
+
 
 class VGGTEncoder(nn.Module):
     def __init__(
         self,
         config: VGGTMergerConfig,
         freeze: bool = True,
-        target_size: int = 518,
     ):
         super().__init__()
         
         self.config = config
         self.freeze = freeze
+        self.patch_size = config.patch_size
+        self.spatial_merge_size = config.spatial_merge_size
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
-        self.model = None
         self.merger = VGGTMerger(config)
-        self.target_size = target_size
-        
-    def _initialize_vggt(self):
-        """Initialize VGGT model - called after parent model is loaded"""
-        if self.model is None:
-            self.model = VGGT.from_pretrained("facebook/VGGT-1B")
-            self.model.camera_head = None
-            self.model.track_head = None
+        self.model = VGGT()
+        self.model.camera_head = None
+        self.model.track_head = None
 
-            target_dtype = next(self.merger.parameters()).dtype
-            if target_dtype == torch.float16:
-                self.model.half()
-            elif target_dtype == torch.bfloat16:
-                self.model.bfloat16()
-            
-            if self.freeze:
-                for param in self.model.parameters():
-                    param.requires_grad = False
-    
-    def _adjust_to_patch_size(self, size: int):
-        return (size // 14) * 14
+        target_dtype = next(self.merger.parameters()).dtype
+        if target_dtype == torch.float16:
+            self.model.half()
+        elif target_dtype == torch.bfloat16:
+            self.model.bfloat16()
+
+    def _compute_target_size(self, H: int, W: int) -> tuple[int, int]:
+        """
+        Compute target size that matches Qwen's patch grid.
+        Must be divisible by (patch_size * spatial_merge_size) = 28
+        """
+        unit = self.patch_size * self.spatial_merge_size  # 14 * 2 = 28
+        
+        # Round to nearest multiple of unit (same logic Qwen uses)
+        target_h = round(H / unit) * unit
+        target_w = round(W / unit) * unit
+        
+        # Ensure minimum size
+        target_h = max(target_h, unit)
+        target_w = max(target_w, unit)
+        
+        return target_h, target_w
  
-    def _preprocess_tensor(self, pixel_values: torch.Tensor, mode: str = "pad") -> torch.Tensor:
-        assert pixel_values.ndim == 4 or pixel_values.ndim == 5, f"Invalid shape of tensor: {pixel_values.shape}"
-        
-        is_video = pixel_values.ndim == 5
-
+    def _preprocess_tensor(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """
+        Preprocess to match Qwen's expected patch grid exactly.
+        """
         if pixel_values.ndim == 4:
             # [F, C, H, W] -> [1, F, C, H, W]
             pixel_values = pixel_values.unsqueeze(0)
         elif pixel_values.ndim == 3:
             # [C, H, W] -> [1, 2, C, H, W]
-            pixel_values = pixel_values.unsqueeze(1)
-            pixel_values = pixel_values.repeat_interleave(2, dim=1)
-            pixel_values = pixel_values.unsqueeze(0)
+            pixel_values = pixel_values.unsqueeze(0).unsqueeze(0)
+            pixel_values = pixel_values.repeat(1, 2, 1, 1, 1)
 
         B, F, C, H, W = pixel_values.shape
-
-        pixel_values = pixel_values.view(B * F, C, H, W)
-
-        target_size = self._adjust_to_patch_size(self.target_size)
-
-        if mode == "pad":
-            max_dim = max(H, W)
-            scale = target_size / max_dim
-
-            new_h = self._adjust_to_patch_size(int(H * scale))
-            new_w = self._adjust_to_patch_size(int(W * scale))
-
-            pixel_values = torch.nn.functional.interpolate(
-                pixel_values, 
-                size=(new_h, new_w), 
-                mode="bilinear", 
-                align_corners=True
-            )
-
-            pad_h = (target_size - new_h) // 2
-            pad_w = (target_size - new_w) // 2
-            pixel_values = torch.nn.functional.pad(
-                pixel_values,
-                (pad_w, target_size - new_w - pad_w, pad_h, target_size - new_h - pad_h),
-                value=1.0
-            )
-        else:
-            scale = target_size / W
-            new_h = int(H * scale)
-            new_w = target_size
-            
+        
+        # Compute target size matching Qwen's grid
+        target_h, target_w = self._compute_target_size(H, W)
+        
+        if H != target_h or W != target_w:
+            pixel_values = pixel_values.view(B * F, C, H, W)
             pixel_values = torch.nn.functional.interpolate(
                 pixel_values,
-                size=(new_h, new_w),
+                size=(target_h, target_w),
                 mode='bilinear',
                 align_corners=False
             )
-            
-            if new_h > target_size:
-                start_h = (new_h - target_size) // 2
-                pixel_values = pixel_values[:, :, start_h:start_h + target_size, :]
-            else:
-                pad_h = (target_size - new_h) // 2
-                pixel_values = torch.nn.functional.pad(
-                    pixel_values,
-                    (0, 0, pad_h, target_size - new_h - pad_h),
-                    value=1.0
-                )
-        
-        final_h = self._adjust_to_patch_size(pixel_values.shape[2])
-        final_w = self._adjust_to_patch_size(pixel_values.shape[3])
-        if pixel_values.shape[2] != final_h or pixel_values.shape[3] != final_w:
-            pixel_values = torch.nn.functional.interpolate(
-                pixel_values,
-                size=(final_h, final_w),
-                mode='bilinear',
-                align_corners=False
-            )
-        
-        pixel_values = pixel_values.view(B, F, C, final_h, final_w)
+            pixel_values = pixel_values.view(B, F, C, target_h, target_w)
                 
         return pixel_values
 
@@ -231,23 +186,15 @@ class VGGTEncoder(nn.Module):
         self, 
         pixel_values: torch.Tensor,
         media_type: str = "video",
-        preprocessing_mode: str = "pad"
-    ) -> torch.Tensor:
-        if self.model is None:
-            self._initialize_vggt()
-        
+    ) -> torch.Tensor:        
         if media_type == "auto":
-            if pixel_values.ndim == 4:
-                media_type = "images"
-            else: 
-                media_type = "video"
+            media_type = "images" if pixel_values.ndim == 4 else "video"
 
-        pixel_values = pixel_values.to(self.model.parameters().__next__().dtype)
-        pixel_values = self._preprocess_tensor(pixel_values, preprocessing_mode)
-
+        pixel_values = pixel_values.to(next(self.model.parameters()).dtype)
+        pixel_values = self._preprocess_tensor(pixel_values)
         pixel_values = pixel_values.to(self.device)
 
-        img_shape = pixel_values.shape[-2:]
+        img_shape = pixel_values.shape[-2:]  # (target_h, target_w)
 
         B, T = pixel_values.shape[:2]
         pixel_values_flat = pixel_values.view(B, T, -1, img_shape[0], img_shape[1])
@@ -264,7 +211,6 @@ class VGGTEncoder(nn.Module):
         return output
     
     def to(self, device):
-        """Override to method to update self.device"""
         self.device = device if isinstance(device, str) else str(device)
         return super().to(device)
 
@@ -276,6 +222,8 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
         self.vggt = VGGTEncoder(vggt_config, freeze=True)
 
         self.vggt_fusion_weight = getattr(config, "vggt_fusion_weight", 0.3)
+
+        self.rope_deltas = None
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):

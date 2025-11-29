@@ -1,8 +1,8 @@
 #! /bin/bash
 
-python scripts/dataset_jsons.py --nframes 32
-python scripts/dataset_jsons.py --nframes 16
-python scripts/dataset_jsons.py --nframes 8
+python scripts/dataset_jsons.py --nframes 32 --nsamples 15000
+python scripts/dataset_jsons.py --nframes 16 --nsamples 15000
+python scripts/dataset_jsons.py --nframes 8 --nsamples 15000
 
 mv qwenmem_nframes_32.json LLaMA-Factory/data/qwenmem_nframes_32.json
 mv qwenmem_nframes_16.json LLaMA-Factory/data/qwenmem_nframes_16.json
