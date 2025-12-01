@@ -233,8 +233,6 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
             **kwargs,
         )
 
-        model.vggt._initialize_vggt()
-
         return model
 
     def get_input_embeddings(self):

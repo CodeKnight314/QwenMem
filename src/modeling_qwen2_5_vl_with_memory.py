@@ -243,8 +243,6 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLForConditionalGener
             **kwargs,
         )
 
-        model.vggt._initialize_vggt()
-
         return model
 
     def get_input_embeddings(self):
@@ -383,7 +381,6 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLForConditionalGener
 
             return position_ids, mrope_position_deltas
 
-    @add_start_docstrings_to_model_forward(QWEN2_5_VL_INPUTS_DOCSTRING)
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -737,20 +734,18 @@ class Qwen2_5_VLForConditionalGenerationWithMemoryM1(Qwen2_5_VLForConditionalGen
                                          device=image_embeds.device,
                                          non_blocking=True)
                         images_tensor.requires_grad_(True)          
-                        vggt_features = self.vggt(images_tensor, media_type="images")
-                        vggt_features = vggt_features.view(-1, vggt_features.shape[-1]) #[F, D]
+                        vggt_embeds = self.vggt(images_tensor, media_type="images")
+                        vggt_embeds = vggt_embeds.view(-1, vggt_embeds.shape[-1]) #[F, D]
                         
-                        if vggt_features.shape[0] == image_embeds.shape[0]:
-                            image_embeds = image_embeds + self.vggt_fusion_weight * vggt_features
                     except Exception as e:
                         print(f"Warning: VGGT processing failed: {e}")
 
-                if self.memory is not None and video_grid_thw is not None and len(video_grid_thw) > 0:
+                if self.memory is not None and image_grid_thw is not None and len(image_grid_thw) > 0:
                     device = image_embeds.device
                     batch_size = input_ids.shape[0]
                     dim = image_embeds.shape[-1]
 
-                    image_embeds_list = []
+                    vggt_embeds_list = []
                     start_idx = 0
                     spatial_merge_size = self.config.vision_config.spatial_merge_size
 
@@ -760,20 +755,23 @@ class Qwen2_5_VLForConditionalGenerationWithMemoryM1(Qwen2_5_VLForConditionalGen
                         num_frames = t.item() if isinstance(t, torch.Tensor) else t
                         total_tokens = num_frames * tokens_per_frame
 
-                        img_tokens = image_embeds[start_idx:start_idx + total_tokens]
+                        img_tokens = vggt_embeds[start_idx:start_idx + total_tokens, :]
                         img_tokens_reshaped = img_tokens.view(1, num_frames, tokens_per_frame, dim)
 
-                        image_embeds_list.append(img_tokens_reshaped)
+                        vggt_embeds_list.append(img_tokens_reshaped)
                         start_idx += total_tokens
 
                     enhanced_list = []
 
-                    for img_tokens_reshaped in image_embeds_list:
-                        enhanced_state, enhanced_visual = self.memory(img_tokens_reshaped, self.state_feat)
+                    for vggt_tokens_reshaped in vggt_embeds_list:
+                        B, F, T, D = vggt_tokens_reshaped.shape
+                        visual_feat_3d = vggt_tokens_reshaped.view(B, F*T, D)
+
+                        enhanced_state, enhanced_visual = self.memory(visual_feat_3d, self.state_feat)
                         self.state_feat = enhanced_state
                         enhanced_list.append(enhanced_visual)
 
-                    image_embeds = torch.cat(enhanced_list, dim=1).view(-1, dim)
+                    vggt_embeds = torch.cat(enhanced_list, dim=1).view(-1, dim)
                 
                 n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
                 n_image_features = image_embeds.shape[0]
@@ -782,6 +780,11 @@ class Qwen2_5_VLForConditionalGenerationWithMemoryM1(Qwen2_5_VLForConditionalGen
                     raise ValueError(
                         f"Image features and tokens mismatch: {n_image_tokens} tokens vs {n_image_features} features"
                     )
+
+                if vggt_embeds is not None and vggt_embeds.shape[0] == image_embeds.shape[0]:
+                    image_embeds = image_embeds + self.vggt_fusion_weight * vggt_embeds
+                else: 
+                    print(f"VGGT embeds shape: {vggt_embeds.shape} does not match image embeds shape: {image_embeds.shape}")
                 
                 mask = input_ids == self.config.image_token_id
                 image_mask = mask.unsqueeze(-1).expand_as(inputs_embeds)
