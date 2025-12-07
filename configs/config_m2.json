@@ -42,7 +42,7 @@
     "text_config": {
       "_name_or_path": "RichardGTang/Qwen2_5_VL-3B-WithMemory",
       "architectures": [
-        "Qwen2_5_VLForConditionalGenerationWithMemoryM2"
+        "Qwen2_5_VLForConditionalGenerationWithMemory"
       ],
       "attention_dropout": 0.0,
       "bos_token_id": 151643,
