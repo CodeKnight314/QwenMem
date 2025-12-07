@@ -23,8 +23,9 @@ export FORCE_TORCHRUN=1
 
 conda activate conda_env/qwenmem/
 
-mv configs/config_mr2.json QwenMem/LLaMA-Factory/models/Qwen2_5_VL-3B-WithMemory/config.json
-cd QwenMem/LLaMA-Factory/
+cd QwenMem/
+mv configs/config_mr2.json LLaMA-Factory/models/Qwen2_5_VL-3B-WithMemory/config.json
+cd LLaMA-Factory/
 
 echo "Starting training at $(date)"
 

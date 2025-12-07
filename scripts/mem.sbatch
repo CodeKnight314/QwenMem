@@ -22,6 +22,7 @@ export TRITON_CACHE_DIR=/scratch/tang.ri/triton_cache
 export FORCE_TORCHRUN=1
 
 conda activate conda_env/qwenmem/
+
 cd QwenMem/
 mv configs/config.json LLaMA-Factory/models/Qwen2_5_VL-3B-WithMemory/config.json
 cd LLaMA-Factory/

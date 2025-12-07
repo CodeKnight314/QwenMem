@@ -24,7 +24,6 @@ export FORCE_TORCHRUN=1
 conda activate conda_env/qwenmem/
 
 cd QwenMem/
-
 mv configs/config_m1.json LLaMA-Factory/models/Qwen2_5_VL-3B-WithMemory/config.json
 cd LLaMA-Factory/
 
