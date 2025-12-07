@@ -126,7 +126,7 @@ class VGGTEncoder(nn.Module):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
         self.merger = VGGTMerger(config)
-        self.model = VGGT()
+        self.model = None
         self.model.camera_head = None
         self.model.track_head = None
 
@@ -135,6 +135,25 @@ class VGGTEncoder(nn.Module):
             self.model.half()
         elif target_dtype == torch.bfloat16:
             self.model.bfloat16()
+
+    def _initialize_vggt(self):
+        """Initialize VGGT model - called after parent model is loaded"""
+        if self.model is None:
+            self.model = VGGT.from_pretrained("facebook/VGGT-1B")
+            self.model.camera_head = None
+            self.model.track_head = None
+
+            target_dtype = next(self.merger.parameters()).dtype
+            if target_dtype == torch.float16:
+                self.model.half()
+            elif target_dtype == torch.bfloat16:
+                self.model.bfloat16()
+
+            self.model.to(self.device)
+            
+            if self.freeze:
+                for param in self.model.parameters():
+                    param.requires_grad = False
 
     def _compute_target_size(self, H: int, W: int) -> tuple[int, int]:
         """
@@ -232,6 +251,8 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
             *args,
             **kwargs,
         )
+
+        model.vggt._initialize_vggt()
 
         return model
 
@@ -531,30 +552,33 @@ class Qwen2_5_VLForConditionalGenerationWithVGGT(Qwen2_5_VLForConditionalGenerat
             if attention_mask is not None:
                 attention_mask = attention_mask.to(inputs_embeds.device)
 
-        if position_ids is None and (
-            attention_mask is None or attention_mask.ndim == 2
-        ):
-            position_ids, rope_deltas = self.get_rope_index(
-                input_ids,
-                image_grid_thw,
-                video_grid_thw,
-                second_per_grid_ts,
-                attention_mask,
-            )
-            self.rope_deltas = rope_deltas
-        else:
-            batch_size, seq_length, _ = inputs_embeds.shape
-            delta = (
-                (cache_position[0] + self.rope_deltas).to(inputs_embeds.device)
-                if cache_position is not None
-                else 0
-            )
-            position_ids = torch.arange(seq_length, device=inputs_embeds.device)
-            position_ids = position_ids.view(1, -1).expand(batch_size, -1)
-            if cache_position is not None:
-                delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
-            position_ids = position_ids.add(delta)
-            position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+        if position_ids is None and (attention_mask is None or attention_mask.ndim == 2):
+            if (
+                (cache_position is not None and cache_position[0] == 0)
+                or self.rope_deltas is None
+                or (past_key_values is None or past_key_values.get_seq_length() == 0)
+            ):
+                position_ids, rope_deltas = self.get_rope_index(
+                    input_ids,
+                    image_grid_thw,
+                    video_grid_thw,
+                    second_per_grid_ts,
+                    attention_mask,
+                )
+                self.rope_deltas = rope_deltas
+            else:
+                batch_size, seq_length, _ = inputs_embeds.shape
+                delta = (
+                    (cache_position[0] + self.rope_deltas).to(inputs_embeds.device)
+                    if cache_position is not None
+                    else 0
+                )
+                position_ids = torch.arange(seq_length, device=inputs_embeds.device)
+                position_ids = position_ids.view(1, -1).expand(batch_size, -1)
+                if cache_position is not None:
+                    delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
+                position_ids = position_ids.add(delta)
+                position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
         outputs = self.model(
             input_ids=None,

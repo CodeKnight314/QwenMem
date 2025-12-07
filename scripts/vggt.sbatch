@@ -26,4 +26,4 @@ cd QwenMem/LLaMA-Factory/
 
 echo "Starting training at $(date)"
 
-lmf train ../configs/vggt/lora/qwen2_5vl_vggt_sft_nframes_16.yaml
+lmf train ../configs/qwen2_5vl_vggt_sft_nframes_16.yaml

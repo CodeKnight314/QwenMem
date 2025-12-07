@@ -3775,5 +3775,17 @@ register_model_group(
             "template": "qwen2_vl",
             "multimodal": True,
         },
+        "Qwen2_5_VL-3B-WithMemoryM1": {
+            "model_type": "qwen2_vl",
+            "model_name_or_path": "./models/Qwen2_5_VL-3B-WithMemory",
+            "template": "qwen2_vl",
+            "multimodal": True,
+        },
+        "Qwen2_5_VL-3B-WithMemoryM2": {
+            "model_type": "qwen2_vl",
+            "model_name_or_path": "./models/Qwen2_5_VL-3B-WithMemory",
+            "template": "qwen2_vl",
+            "multimodal": True,
+        },
     }
 )

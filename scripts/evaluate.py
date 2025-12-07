@@ -432,7 +432,7 @@ if __name__ == "__main__":
 
 """
 torchrun --nproc_per_node=4 -- evaluate.py \
-    --m RichardGTang/Qwen2_5_VL-3B-WithMemory \
+    --m RichardGTang/Qwen2_5_VL-3B-WithVGGT \
     --o vsi_bench_outputs/ \
     --n 16 \
     --distributed

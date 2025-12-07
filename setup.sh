@@ -18,5 +18,5 @@ git clone https://huggingface.co/Codeknight314/Qwen2_5_VL-3B-WithVGGT
 
 mkdir -p LLaMA-Factory/models
 
-mv Qwen2_5_VL-3B-WithMemory LLaMA-Factory/models/
-mv Qwen2_5_VL-3B-WithVGGT   LLaMA-Factory/models/
+mv Qwen2_5_VL-3B-WithMemory LLaMA-Factory/models/Qwen2_5_VL-3B-WithMemory/
+mv Qwen2_5_VL-3B-WithVGGT   LLaMA-Factory/models/Qwen2_5_VL-3B-WithVGGT/

@@ -1,4 +1,4 @@
-Dataset,qwen2-5-vl-3b,qwen2-5-vl-7b,qwen3-vl-2b,qwen3-vl-4b,qwen3-vl-8b
-arkitscenes,16.55,19.36,32.48,37.48,38.73
-scannet,18.64,21.92,35.73,41.33,41.72
-scannetpp,19.62,23.53,34.16,41.15,40.88
+Dataset,CUT3R-Memory,Qwen3b-baseline,QwenVGGT+Explicit,QwenVGGT,VectorDB-Explicit-Memory
+arkitscenes,18.48,18.36,21.11,18.76,21.61
+scannet,15.55,19.70,19.89,17.62,19.46
+scannetpp,18.03,20.71,23.59,23.01,22.29

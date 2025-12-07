@@ -22,8 +22,12 @@ export TRITON_CACHE_DIR=/scratch/tang.ri/triton_cache
 export FORCE_TORCHRUN=1
 
 conda activate conda_env/qwenmem/
-cd QwenMem/LLaMA-Factory/
+
+cd QwenMem/
+
+mv configs/config_m1.json LLaMA-Factory/models/Qwen2_5_VL-3B-WithMemory/config.json
+cd LLaMA-Factory/
 
 echo "Starting training at $(date)"
 
-lmf train ../configs/mem/lora/qwen2_5vl_mem_sft_nframes_16.yaml
+lmf train ../configs/qwen2_5vl_mem_sft_nframes_16.yaml

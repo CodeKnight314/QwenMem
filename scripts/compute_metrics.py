@@ -340,7 +340,7 @@ def main(margin_percent: float = 5.0):
     Args:
         margin_percent: Percentage margin for numeric answers (default: 5%)
     """
-    eval_dir = "QwenEval"
+    eval_dir = "eval/QwenEval"
     csv_dir = os.path.join(eval_dir, "csv")
     charts_dir = os.path.join(eval_dir, "charts")
     
@@ -350,7 +350,7 @@ def main(margin_percent: float = 5.0):
     json_files = [
         os.path.join(eval_dir, f) 
         for f in os.listdir(eval_dir)
-        if f.startswith("vsi_preds_") and f.endswith(".json") and "_corrected" not in f
+        if f.endswith(".json")
     ]
     
     if not json_files:
@@ -385,7 +385,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Evaluate model predictions with customizable margin for numeric answers")
-    parser.add_argument("--margin", type=float, default=5.0, 
+    parser.add_argument("--margin", type=float, default=10.0, 
                        help="Percentage margin for numeric answers (default: 5.0)")
     
     args = parser.parse_args()
