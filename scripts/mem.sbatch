@@ -24,8 +24,11 @@ export FORCE_TORCHRUN=1
 conda activate conda_env/qwenmem/
 
 cd QwenMem/
-mv configs/config.json LLaMA-Factory/models/Qwen2_5_VL-3B-WithMemory/config.json
+cp -f configs/config.json LLaMA-Factory/models/Qwen2_5_VL-3B-WithMemory/config.json
 cd LLaMA-Factory/
+
+OUTPUT_DIR = "saves/qwen2_5vl-3b/sft/memory/base/nframes_16"
+sed -i "s|^output_dir:.*|output_dir: ${OUTPUT_DIR}|" ../configs/qwen2_5vl_mem_sft_nframes_16.yaml   
 
 echo "Starting training at $(date)"
 
