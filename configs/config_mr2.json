@@ -1,13 +1,13 @@
 {
     "architectures": [
-      "Qwen2_5_VLForConditionalGenerationWithMemoryMR2"
+      "Qwen2_5_VLForConditionalGenerationWithMemory"
     ],
     "attention_dropout": 0.0,
     "auto_map": {
       "AutoConfig": "configuration_qwen2_5_vl.Qwen2_5_VLConfig",
-      "AutoModelForCausalLM": "modeling_qwen2_5_vl_with_memory.Qwen2_5_VLForConditionalGenerationWithMemoryMR2",
-      "AutoModelForImageTextToText": "modeling_qwen2_5_vl_with_memory.Qwen2_5_VLForConditionalGenerationWithMemoryMR2",
-      "AutoModelForVision2Seq": "modeling_qwen2_5_vl_with_memory.Qwen2_5_VLForConditionalGenerationWithMemoryMR2"
+      "AutoModelForCausalLM": "modeling_qwen2_5_vl_with_memory.Qwen2_5_VLForConditionalGenerationWithMemory",
+      "AutoModelForImageTextToText": "modeling_qwen2_5_vl_with_memory.Qwen2_5_VLForConditionalGenerationWithMemory",
+      "AutoModelForVision2Seq": "modeling_qwen2_5_vl_with_memory.Qwen2_5_VLForConditionalGenerationWithMemory"
     },
     "bos_token_id": 151643,
     "dtype": "float32",
