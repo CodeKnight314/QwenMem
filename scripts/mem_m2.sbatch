@@ -27,9 +27,6 @@ cd QwenMem/
 cp -f configs/config_m2.json LLaMA-Factory/models/Qwen2_5_VL-3B-WithMemory/config.json
 cd LLaMA-Factory/
 
-OUTPUT_DIR = "saves/qwen2_5vl-3b/sft/memory/m2/nframes_16"
-sed -i "s|^output_dir:.*|output_dir: ${OUTPUT_DIR}|" ../configs/qwen2_5vl_mem_sft_nframes_16.yaml
-
 echo "Starting training at $(date)"
 
-lmf train ../configs/qwen2_5vl_mem_sft_nframes_16.yaml
+lmf train ../configs/qwen2_5vl_mem_sft_nframes_16_m2.yaml
