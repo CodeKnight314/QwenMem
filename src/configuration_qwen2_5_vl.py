@@ -31,6 +31,8 @@ from transformers import PretrainedConfig
 from transformers.modeling_rope_utils import rope_config_validation
 from typing import TypedDict
 
+_REQUIRED = object()
+
 def standardize_rope_params(config, rope_theta: float | dict[str, float] | None = None):
     """
     Helper to standardize the config's rope params field by ensuring the params are defined for each
@@ -378,6 +380,11 @@ class Qwen2_5_VLConfig(PretrainedConfig):
         video_token_id=151656,
         vision_start_token_id=151652,
         vision_end_token_id=151653,
+        memory_type=_REQUIRED, 
+        forward_type=_REQUIRED, 
+        vggt_fusion_weight=_REQUIRED,
+        use_state_injection=_REQUIRED,
+        num_state_tokens=_REQUIRED,
         **kwargs,
     ):
         # We need to init super() here so that it does not reset values
@@ -400,6 +407,23 @@ class Qwen2_5_VLConfig(PretrainedConfig):
         self.video_token_id = video_token_id
         self.vision_start_token_id = vision_start_token_id
         self.vision_end_token_id = vision_end_token_id
+
+        required_fields = {
+            "memory_type" : memory_type,
+            "forward_type" : forward_type,
+            "vggt_fusion_weight" : vggt_fusion_weight,
+            "num_state_tokens" : num_state_tokens if forward_type == "m3" else None,
+        }
+
+        missing_fields = [field for field, value in required_fields.items() if value is _REQUIRED]
+        if missing_fields:
+            raise ValueError(f"The following fields are required: {missing_fields}")
+
+        self.memory_type = memory_type
+        self.forward_type = forward_type
+        self.vggt_fusion_weight = float(vggt_fusion_weight)
+        if forward_type == "m3":
+            self.num_state_tokens = int(num_state_tokens)
 
         # Attention implementation to use. It sets it recursively on sub-configs so we call it again in the end
         self._attn_implementation = kwargs.pop("attn_implementation", None)

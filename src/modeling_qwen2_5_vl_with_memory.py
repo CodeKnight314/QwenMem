@@ -34,6 +34,40 @@ class MemoryConfig:
     forward_type: str = "base"
 
 
+class StateInjection(nn.Module): 
+    def __init__(
+        self, 
+        state_dim: int, 
+        hidden_dim: int, 
+        num_tokens: int, 
+        state_size: int
+    ): 
+        super().__init__()
+        self.state_dim = state_dim
+        self.hidden_dim = hidden_dim
+        self.num_tokens = num_tokens
+        self.state_size = state_size
+
+        self.feature_proj = nn.Linear(self.state_dim, hidden_dim)
+        self.gelu = nn.GELU() 
+
+        self.token_pool = nn.Linear(self.state_size, num_tokens)
+        self.state_injector_ln = Qwen2RMSNorm(hidden_dim)
+
+    def forward(self, state_feat: torch.Tensor, batch_size: int) -> torch.Tensor:
+        if state_feat.ndim == 2:
+            state_feat = state_feat.unsqueeze(0).expand(batch_size, -1, -1)
+
+        x = self.feature_proj(state_feat)
+        x = self.gelu(x)
+
+        x = x.transpose(1, 2)
+        x = self.token_pool(x)
+        x = x.transpose(1, 2)
+        
+        return self.state_injector_ln(x)
+
+
 class VGGTMerger(nn.Module):
     def __init__(self, config: VGGTMergerConfig):
         super().__init__()
@@ -200,15 +234,28 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLForConditionalGener
     def __init__(self, config):
         super().__init__(config)
         
-        self.memory_type = getattr(config, "memory_type", "base")
-        self.forward_type = getattr(config, "forward_type", "m1")
-        self.vggt_fusion_weight = getattr(config, "vggt_fusion_weight", 0.3)
+        self.memory_type = config.memory_type
+        self.forward_type = config.forward_type
+        self.vggt_fusion_weight = config.vggt_fusion_weight
+        self.use_state_injection = config.forward_type == "m3"
     
         vggt_config = VGGTMergerConfig(output_dim=config.hidden_size)
         self.vggt = VGGTEncoder(vggt_config, freeze=True)
         
         memory_cls = self.MEMORY_REGISTRY.get(self.memory_type)
         self.memory = memory_cls(visual_dim=config.hidden_size) if memory_cls else None
+
+        if self.use_state_injection and self.memory is not None:
+            self.num_state_tokens = config.num_state_tokens
+            self.state_injection = StateInjection(
+                state_size=self.memory.state_size,
+                hidden_dim=config.hidden_size,
+                num_tokens=self.num_state_tokens,
+                state_dim=self.memory.state_dim,
+            )
+        else:
+            self.num_state_tokens = 0
+            self.state_injection = None
 
         self.state_feat = None
         self.rope_deltas = None
@@ -354,9 +401,12 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLForConditionalGener
             return self._process_m1(qwen_embeds, pixel_tensor, grid_thw, media_type)
         elif self.forward_type == "m2":
             return self._process_m2(qwen_embeds, pixel_tensor, grid_thw, media_type)
+        elif self.forward_type == "m3":
+            return self._process_m3(qwen_embeds, pixel_tensor, grid_thw, media_type)
         else:
             raise ValueError(f"Invalid forward_type: {self.forward_type}")
 
+    # VGGT + Qwen Tokens
     def _process_base(
         self,
         qwen_embeds: torch.Tensor,
@@ -370,6 +420,7 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLForConditionalGener
         
         return qwen_embeds
 
+    # Memory(VGGT + Qwen Tokens)
     def _process_m1(
         self,
         qwen_embeds: torch.Tensor,
@@ -377,8 +428,6 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLForConditionalGener
         grid_thw: torch.LongTensor,
         media_type: str,
     ) -> torch.Tensor:
-        vggt_embeds = None
-        
         if pixel_tensor is not None:
             vggt_embeds = self.vggt_forward(pixel_tensor, media_type=media_type)
             qwen_embeds = self.fuse_embeddings(qwen_embeds, vggt_embeds)
@@ -386,6 +435,7 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLForConditionalGener
         
         return qwen_embeds
     
+    # Memory(VGGT) + Qwen Tokens
     def _process_m2(
         self, 
         qwen_embeds: torch.Tensor,
@@ -393,13 +443,27 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLForConditionalGener
         grid_thw: torch.LongTensor,
         media_type: str,
     ) -> torch.Tensor:
-        vggt_embeds = None
-        
         if pixel_tensor is not None:
             vggt_embeds = self.vggt_forward(pixel_tensor, media_type=media_type)
             if vggt_embeds is not None: 
                 vggt_embeds = self.memory_forward(vggt_embeds, grid_thw)
                 qwen_embeds = self.fuse_embeddings(qwen_embeds, vggt_embeds)
+        
+        return qwen_embeds
+    
+    # Memory(Qwen + VGGT) + state injection (seen later)
+    def _process_m3(
+        self,
+        qwen_embeds: torch.Tensor,
+        pixel_tensor: Optional[torch.Tensor],
+        grid_thw: torch.LongTensor,
+        media_type: str,
+    ) -> torch.Tensor:
+        if pixel_tensor is not None:
+            vggt_embeds = self.vggt_forward(pixel_tensor, media_type=media_type)
+            if vggt_embeds is not None: 
+                qwen_embeds = self.fuse_embeddings(qwen_embeds, vggt_embeds)
+                qwen_embeds = self.memory_forward(qwen_embeds, grid_thw)
         
         return qwen_embeds
 
@@ -576,6 +640,29 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLForConditionalGener
             
             if attention_mask is not None:
                 attention_mask = attention_mask.to(inputs_embeds.device)
+
+        original_attention_mask = attention_mask
+
+        is_first_step = cache_position is None or cache_position[0] == 0
+        should_inject_state = (
+            self.state_injection is not None 
+            and self.state_feat is not None
+            and is_first_step
+        )
+
+        num_state_tokens_added = 0
+
+        if should_inject_state:
+            state_tokens = self.state_injection(self.state_feat, input_ids.shape[0])
+            inputs_embeds = torch.cat([state_tokens, inputs_embeds], dim=1)
+            num_state_tokens_added = state_tokens.shape[1]
+            
+            if attention_mask is not None:
+                state_mask = torch.ones(
+                    attention_mask.shape[0], num_state_tokens_added,
+                    device=attention_mask.device, dtype=attention_mask.dtype
+                )
+                attention_mask = torch.cat([state_mask, attention_mask], dim=1)
         
         if position_ids is None and (attention_mask is None or attention_mask.ndim == 2):
             if (
@@ -584,8 +671,23 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLForConditionalGener
                 or (past_key_values is None or past_key_values.get_seq_length() == 0)
             ):
                 position_ids, rope_deltas = self.get_rope_index(
-                    input_ids, image_grid_thw, video_grid_thw, second_per_grid_ts, attention_mask
+                    input_ids, 
+                    image_grid_thw, 
+                    video_grid_thw, 
+                    second_per_grid_ts, 
+                    original_attention_mask
                 )
+
+                if num_state_tokens_added > 0:
+                    B = position_ids.shape[1]
+                    state_positions = torch.arange(
+                        num_state_tokens_added, 
+                        device=position_ids.device, 
+                        dtype=position_ids.dtype
+                    ).view(1, 1, -1).expand(3, B, -1)
+                    position_ids = position_ids + num_state_tokens_added
+                    position_ids = torch.cat([state_positions, position_ids], dim=2)
+
                 self.rope_deltas = rope_deltas
             else:
                 batch_size, seq_length, _ = inputs_embeds.shape
@@ -596,6 +698,15 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLForConditionalGener
                     delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
                 position_ids = position_ids.add(delta)
                 position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+
+        if labels is not None and num_state_tokens_added > 0:
+            ignore_labels = torch.full(
+                (labels.shape[0], num_state_tokens_added),
+                -100,
+                device=labels.device, 
+                dtype=labels.dtype
+            )
+            labels = torch.cat([ignore_labels, labels], dim=1)
         
         outputs = self.model(
             input_ids=None,
