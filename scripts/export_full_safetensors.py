@@ -10,7 +10,7 @@ This script:
 
 Example:
   python scripts/export_full_safetensors.py \
-    --base_model Qwen/Qwen2.5-VL-3B-Instruct \
+    --base_model RichardGTang/Qwen2_5_VL-3B-WithMemory\
     --checkpoint_dir /path/to/m1-checkpoint \
     --output_dir /path/to/m1-weights \
     --memory_type base \
@@ -110,6 +110,11 @@ def main() -> None:
         action="store_true",
         help="Pass trust_remote_code=True when loading base model configs/weights from Hub.",
     )
+    parser.add_argument(
+        "--load_extra_bin",
+        action="store_true",
+        help="If checkpoint_dir contains pytorch_model.bin, load it into the base model with strict=False before applying LoRA.",
+    )
     args = parser.parse_args()
 
     _add_repo_to_syspath()
@@ -172,6 +177,40 @@ def main() -> None:
         low_cpu_mem_usage=True,
         trust_remote_code=args.trust_remote_code,
     )
+
+    extra_bin = checkpoint_dir / "pytorch_model.bin"
+    if args.load_extra_bin and extra_bin.exists():
+        stage(f"Loading extra weights from pytorch_model.bin: {extra_bin}")
+        import torch
+
+        obj = torch.load(str(extra_bin), map_location="cpu")
+        # Common formats:
+        # - raw state_dict: {name: tensor, ...}
+        # - wrapper dict: {"state_dict": {...}} or {"model": {...}} or {"module": {...}}
+        state_dict = None
+        if isinstance(obj, dict):
+            if "state_dict" in obj and isinstance(obj["state_dict"], dict):
+                state_dict = obj["state_dict"]
+            elif "model" in obj and isinstance(obj["model"], dict):
+                state_dict = obj["model"]
+            elif "module" in obj and isinstance(obj["module"], dict):
+                state_dict = obj["module"]
+            else:
+                # Heuristic: treat as state_dict if it looks like one.
+                if all(isinstance(k, str) for k in obj.keys()):
+                    state_dict = obj
+        if not isinstance(state_dict, dict):
+            raise RuntimeError(
+                f"Unrecognized pytorch_model.bin format at {extra_bin}. "
+                "Expected a state_dict-like dict or a dict containing 'state_dict'/'model'/'module'."
+            )
+
+        incompatible = model.load_state_dict(state_dict, strict=False)
+        # torch returns IncompatibleKeys(missing_keys, unexpected_keys)
+        stage(
+            f"Loaded extra_bin with strict=False: "
+            f"{len(incompatible.missing_keys)} missing keys, {len(incompatible.unexpected_keys)} unexpected keys"
+        )
 
     stage("Loading PEFT adapter...")
     model = PeftModel.from_pretrained(model, str(checkpoint_dir), is_trainable=False)
