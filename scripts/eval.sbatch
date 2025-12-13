@@ -25,13 +25,19 @@ conda activate conda_env/qwenmem/
 cd QwenMem/
 
 torchrun --nproc_per_node=4 -- evaluate.py \
-    --m RichardGTang/Qwen2_5_VL-3B-WithMemory \
-    --o vsi_bench_outputs/ \
+    --m RichardGTang/QwenMemM1 \
+    --o vsi_bench_outputs/m1/ \
     --n 16 \
     --distributed
 
 torchrun --nproc_per_node=4 -- evaluate.py \
-    --m RichardGTang/Qwen2_5_VL-3B-WithVGGT \
-    --o vsi_bench_outputs/ \
+    --m RichardGTang/QwenMemM2 \
+    --o vsi_bench_outputs/m2/ \
+    --n 16 \
+    --distributed
+
+torchrun --nproc_per_node=4 -- evaluate.py \
+    --m RichardGTang/QwenMemM3 \
+    --o vsi_bench_outputs/m3/ \
     --n 16 \
     --distributed

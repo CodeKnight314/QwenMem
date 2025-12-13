@@ -154,30 +154,15 @@ def run_vsi_eval(
     
     # Load model with proper device_map for single or multi-GPU
     if custom_models_available:
-        if model_name == "RichardGTang/Qwen2_5_VL-3B-WithVGGT":
+        if model_name.startswith("RichardGTang/"):
             if distributed and world_size > 1:
-                # For distributed, load on specific device
                 model = Qwen2_5_VLForConditionalGenerationWithVGGT.from_pretrained(
                     model_name, 
                     trust_remote_code=True,
                     dtype=torch.float16
                 ).to(device)
             else:
-                # For single GPU or DataParallel, use device_map
                 model = Qwen2_5_VLForConditionalGenerationWithVGGT.from_pretrained(
-                    model_name, 
-                    device_map="auto", 
-                    trust_remote_code=True
-                )
-        elif model_name == "RichardGTang/Qwen2_5_VL-3B-WithMemory":
-            if distributed and world_size > 1:
-                model = Qwen2_5_VLForConditionalGenerationWithMemory.from_pretrained(
-                    model_name,
-                    trust_remote_code=True,
-                    dtype=torch.float16
-                ).to(device)
-            else:
-                model = Qwen2_5_VLForConditionalGenerationWithMemory.from_pretrained(
                     model_name, 
                     device_map="auto", 
                     trust_remote_code=True
