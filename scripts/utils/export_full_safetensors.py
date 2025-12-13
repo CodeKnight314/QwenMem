@@ -1,15 +1,4 @@
 """
-Export a PEFT/LoRA adapter checkpoint (e.g. `m1-checkpoint/`) into full merged `.safetensors`
-weights that can be loaded by `Qwen2_5_VLForConditionalGenerationWithMemory`.
-
-This script:
-  1) loads the base model weights
-  2) loads the PEFT adapter from the checkpoint folder
-  3) merges LoRA weights into the base model (`merge_and_unload`)
-  4) saves a full merged model using safetensors to an `XX-weights/` output folder
-"""
-
-"""
 python scripts/export_full_safetensors.py --base_model RichardGTang/Qwen2_5_VL-3B-WithMemory --checkpoint_dir /projects/vig/tangri/saves/qwen2_5vl-3b/sft/memory/m1/nframes_16/checkpoint-236 --output_dir /projects/vig/tangri/QwenMem/saves/m1/ --memory_type base --forward_type m1 --load_extra_bin
 python scripts/export_full_safetensors.py --base_model RichardGTang/Qwen2_5_VL-3B-WithMemory --checkpoint_dir /projects/vig/tangri/saves/qwen2_5vl-3b/sft/memory/m2/nframes_16/checkpoint-236 --output_dir /projects/vig/tangri/QwenMem/saves/m2/--memory_type base --forward_type m2 --load_extra_bin
 python scripts/export_full_safetensors.py --base_model RichardGTang/Qwen2_5_VL-3B-WithMemory --checkpoint_dir /projects/vig/tangri/saves/qwen2_5vl-3b/sft/memory/m3/nframes_16/checkpoint-236 --output_dir /projects/vig/tangri/QwenMem/saves/m3/ --memory_type base --forward_type m3 --load_extra_bin
