@@ -136,7 +136,6 @@ def run_vsi_eval(
     
     # Import custom models if available
     try:
-        from src.modeling_qwen2_5_vl_with_vggt import Qwen2_5_VLForConditionalGenerationWithVGGT
         from src.modeling_qwen2_5_vl_with_memory import Qwen2_5_VLForConditionalGenerationWithMemory
         custom_models_available = True
     except ImportError:
@@ -156,13 +155,13 @@ def run_vsi_eval(
     if custom_models_available:
         if model_name.startswith("RichardGTang/"):
             if distributed and world_size > 1:
-                model = Qwen2_5_VLForConditionalGenerationWithVGGT.from_pretrained(
+                model = Qwen2_5_VLForConditionalGenerationWithMemory.from_pretrained(
                     model_name, 
                     trust_remote_code=True,
                     dtype=torch.float16
                 ).to(device)
             else:
-                model = Qwen2_5_VLForConditionalGenerationWithVGGT.from_pretrained(
+                model = Qwen2_5_VLForConditionalGenerationWithMemory.from_pretrained(
                     model_name, 
                     device_map="auto", 
                     trust_remote_code=True
