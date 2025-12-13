@@ -653,18 +653,42 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLForConditionalGener
         num_state_tokens_added = 0
 
         if should_inject_state:
-            state_tokens = self.state_injection(self.state_feat, input_ids.shape[0])
+            batch_size = input_ids.shape[0] if input_ids is not None else inputs_embeds.shape[0]
+            state_tokens = self.state_injection(self.state_feat, batch_size)
             inputs_embeds = torch.cat([state_tokens, inputs_embeds], dim=1)
             num_state_tokens_added = state_tokens.shape[1]
             
             if attention_mask is not None:
                 state_mask = torch.ones(
-                    attention_mask.shape[0], num_state_tokens_added,
-                    device=attention_mask.device, dtype=attention_mask.dtype
+                    attention_mask.shape[0], 
+                    num_state_tokens_added,
+                    device=attention_mask.device, 
+                    dtype=attention_mask.dtype
                 )
                 attention_mask = torch.cat([state_mask, attention_mask], dim=1)
+
+        if num_state_tokens_added > 0:
+            position_ids, rope_deltas = self.get_rope_index(
+                input_ids, 
+                image_grid_thw, 
+                video_grid_thw, 
+                second_per_grid_ts, 
+                original_attention_mask
+            )
+
+            B = position_ids.shape[1]
+            state_positions = torch.arange(
+                num_state_tokens_added, 
+                device=position_ids.device, 
+                dtype=position_ids.dtype
+            ).view(1, 1, -1).expand(3, B, -1)
+            
+            position_ids = position_ids + num_state_tokens_added
+            position_ids = torch.cat([state_positions, position_ids], dim=2)
+            rope_deltas = rope_deltas + num_state_tokens_added
+            self.rope_deltas = rope_deltas
         
-        if position_ids is None and (attention_mask is None or attention_mask.ndim == 2):
+        elif position_ids is None and (attention_mask is None or attention_mask.ndim == 2):
             if (
                 (cache_position is not None and cache_position[0] == 0)
                 or self.rope_deltas is None
@@ -677,17 +701,6 @@ class Qwen2_5_VLForConditionalGenerationWithMemory(Qwen2_5_VLForConditionalGener
                     second_per_grid_ts, 
                     original_attention_mask
                 )
-
-                if num_state_tokens_added > 0:
-                    B = position_ids.shape[1]
-                    state_positions = torch.arange(
-                        num_state_tokens_added, 
-                        device=position_ids.device, 
-                        dtype=position_ids.dtype
-                    ).view(1, 1, -1).expand(3, B, -1)
-                    position_ids = position_ids + num_state_tokens_added
-                    position_ids = torch.cat([state_positions, position_ids], dim=2)
-
                 self.rope_deltas = rope_deltas
             else:
                 batch_size, seq_length, _ = inputs_embeds.shape
